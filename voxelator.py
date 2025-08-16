@@ -12,6 +12,7 @@ bl_info = {
 
 
 import bpy
+from mathutils import Vector
 from bpy.props import (
     IntProperty,
     BoolProperty
@@ -22,6 +23,45 @@ from bpy.types import (
     Panel,
     PropertyGroup
 )
+
+def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filename):
+    bb = [target_obj.matrix_world @ Vector(v) for v in target_obj.bound_box]
+    min_x = min(v.x for v in bb)
+    min_y = min(v.y for v in bb)
+    min_z = min(v.z for v in bb)
+    ox = min_x + cell_len * 0.5
+    oy = min_y + cell_len * 0.5
+    oz = min_z + cell_len * 0.5
+    layers = [set() for _ in range(dz)]
+    for o in cubes:
+        loc = o.matrix_world.translation
+        ix = int(round((loc.x - ox) / cell_len))
+        iy = int(round((loc.y - oy) / cell_len))
+        iz = int(round((loc.z - oz) / cell_len))
+        if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
+            layers[iz].add((ix, iy))
+    tile = max(dx, dy)
+    width = tile * dz
+    height = tile
+    img = bpy.data.images.new(f"voxel_slices_{filename}", width=width, height=height, alpha=True, float_buffer=False)
+    px = [0.0] * (width * height * 4)
+    off_x = (tile - dx) // 2
+    off_y = (tile - dy) // 2
+    for z in range(dz):
+        x0 = z * tile
+        for ix, iy in layers[z]:
+            px_x = x0 + off_x + ix
+            px_y = off_y + iy
+            if 0 <= px_x < width and 0 <= px_y < height:
+                idx = ((height - 1 - px_y) * width + px_x) * 4
+                px[idx] = 1.0
+                px[idx + 1] = 1.0
+                px[idx + 2] = 1.0
+                px[idx + 3] = 1.0
+    img.pixels = px
+    img.filepath_raw = bpy.path.abspath(f"//{filename}.png")
+    img.file_format = 'PNG'
+    img.save()
 
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
@@ -82,6 +122,7 @@ class OBJECT_OT_voxelize(Operator):
 
         #decide cube size based on resolution and size of original mesh
         cube_size = max(target.dimensions) / (self.voxelizeResolution*2)
+        cell_len = cube_size * 2
 
         #apply cube particles to duplicated mesh to create voxels
         target.modifiers.new(name='voxel system',type='PARTICLE_SYSTEM')
@@ -104,9 +145,16 @@ class OBJECT_OT_voxelize(Operator):
 
         bpy.context.scene.objects["voxel_cube"].select_set(False)
         bpy.context.scene.objects[target_name].select_set(True)
+        existing_names = {o.name for o in bpy.context.scene.objects}
 
         #create cubes from the particles
         bpy.ops.object.duplicates_make_real()
+
+        dx = max(1, int(round(target.dimensions[0] / cell_len)))
+        dy = max(1, int(round(target.dimensions[1] / cell_len)))
+        dz = max(1, int(round(target.dimensions[2] / cell_len)))
+        new_cubes = [o for o in bpy.context.scene.objects if o.name not in existing_names and o.type == 'MESH']
+        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, f"{source_name}_voxel_slices_{self.voxelizeResolution}")
 
         #remove the duplicated mesh, leaving behind the voxelized mesh
         bpy.data.objects.remove(bpy.data.objects[target_name], do_unlink=True)
@@ -148,7 +196,8 @@ class OBJECT_OT_voxelize(Operator):
         bpy.ops.mesh.select_mode(type='FACE')
         bpy.context.area.ui_type = 'UV'
         bpy.context.scene.tool_settings.use_uv_select_sync = False
-        bpy.context.space_data.uv_editor.sticky_select_mode = 'DISABLED'
+        if hasattr(bpy.context.space_data.uv_editor, "sticky_select_mode"):
+            bpy.context.space_data.uv_editor.sticky_select_mode = 'DISABLED'
         bpy.context.scene.tool_settings.uv_select_mode = 'FACE'
         bpy.context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
         bpy.ops.mesh.select_all(action='DESELECT')
