@@ -12,10 +12,12 @@ bl_info = {
 
 
 import bpy
+import os
 from mathutils import Vector
 from bpy.props import (
     IntProperty,
-    BoolProperty
+    BoolProperty,
+    StringProperty
 )
 from bpy.types import (
     AddonPreferences,
@@ -24,7 +26,7 @@ from bpy.types import (
     PropertyGroup
 )
 
-def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filename):
+def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath):
     bb = [target_obj.matrix_world @ Vector(v) for v in target_obj.bound_box]
     min_x = min(v.x for v in bb)
     min_y = min(v.y for v in bb)
@@ -43,7 +45,9 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filename):
     tile = max(dx, dy)
     width = tile * dz
     height = tile
-    img = bpy.data.images.new(f"voxel_slices_{filename}", width=width, height=height, alpha=True, float_buffer=False)
+    abs_path = bpy.path.abspath(filepath)
+    base = os.path.splitext(os.path.basename(abs_path))[0]
+    img = bpy.data.images.new(f"voxel_slices_{base}", width=width, height=height, alpha=True, float_buffer=False)
     px = [0.0] * (width * height * 4)
     off_x = (tile - dx) // 2
     off_y = (tile - dy) // 2
@@ -59,7 +63,7 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filename):
                 px[idx + 2] = 1.0
                 px[idx + 3] = 1.0
     img.pixels = px
-    img.filepath_raw = bpy.path.abspath(f"//{filename}.png")
+    img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
 
@@ -89,6 +93,12 @@ class OBJECT_OT_voxelize(Operator):
         description="Keep cubes as separate meshes inside the same object.",
         default = False
     )
+    slices_filepath: bpy.props.StringProperty(
+        name="Slices PNG",
+        description="Path to save the voxel slice spritesheet (.png)",
+        subtype='FILE_PATH',
+        default=""
+    )
     
     @classmethod
     def poll(cls, context):
@@ -96,6 +106,13 @@ class OBJECT_OT_voxelize(Operator):
     
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "voxelizeResolution")
+        layout.prop(self, "fill_volume")
+        layout.prop(self, "separate_cubes")
+        layout.prop(self, "slices_filepath")
     
     def execute(self, context):
 
@@ -154,7 +171,12 @@ class OBJECT_OT_voxelize(Operator):
         dy = max(1, int(round(target.dimensions[1] / cell_len)))
         dz = max(1, int(round(target.dimensions[2] / cell_len)))
         new_cubes = [o for o in bpy.context.scene.objects if o.name not in existing_names and o.type == 'MESH']
-        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, f"{source_name}_voxel_slices_{self.voxelizeResolution}")
+        save_path = self.slices_filepath.strip()
+        if not save_path:
+            save_path = bpy.path.abspath(f"//{source_name}_voxel_slices_{self.voxelizeResolution}.png")
+        elif not save_path.lower().endswith(".png"):
+            save_path = save_path + ".png"
+        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, save_path)
 
         #remove the duplicated mesh, leaving behind the voxelized mesh
         bpy.data.objects.remove(bpy.data.objects[target_name], do_unlink=True)
