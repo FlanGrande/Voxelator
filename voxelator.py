@@ -219,9 +219,13 @@ class OBJECT_OT_voxelize(Operator):
         _log("[Voxelator] Instantiating particles...")
 
         #create cubes from the particles
-        bpy.ops.object.duplicates_make_real()
-        created_count = sum(1 for o in bpy.context.scene.objects if o.name not in existing_names)
-        _log(f"[Voxelator] New objects: {created_count}")
+        prefs = bpy.context.preferences
+        prev_undo = prefs.edit.use_global_undo
+        prefs.edit.use_global_undo = False
+        try:
+            bpy.ops.object.duplicates_make_real()
+        finally:
+            prefs.edit.use_global_undo = prev_undo
 
         dx = max(1, int(round(target.dimensions[0] / cell_len)))
         dy = max(1, int(round(target.dimensions[1] / cell_len)))
