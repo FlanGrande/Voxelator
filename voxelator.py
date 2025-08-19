@@ -34,35 +34,29 @@ def _log(msg):
     except Exception:
         pass
 
-def _get_material_color(mat_slots):
-    if not mat_slots:
+def _get_color_from_material(mat):
+    if not mat or not getattr(mat, "use_nodes", False):
         return (1.0, 1.0, 1.0, 1.0)
-    
-    for mat_slot in mat_slots:
-        mat = mat_slot.material
-        if not mat or not mat.use_nodes:
-            continue
-        
-        for node in mat.node_tree.nodes:
-            if node.type == 'BSDF_PRINCIPLED':
-                base_color = node.inputs['Base Color']
-                if base_color.is_linked:
-                    linked_node = base_color.links[0].from_node
-                    if linked_node.type == 'TEX_IMAGE' and linked_node.image:
-                        return (1.0, 0.5, 0.5, 1.0)
-                else:
-                    return base_color.default_value[:]
-            if node.type == 'BSDF_TOON':
-                base_color = node.inputs['Color']
-                if base_color.is_linked:
-                    linked_node = base_color.links[0].from_node
-                    if linked_node.type == 'TEX_IMAGE' and linked_node.image:
-                        return (1.0, 0.5, 0.5, 1.0)
-                else:
-                    return base_color.default_value[:]
+    for node in mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            base_color = node.inputs['Base Color']
+            if base_color.is_linked:
+                linked_node = base_color.links[0].from_node
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    return (1.0, 0.5, 0.5, 1.0)
+            else:
+                return base_color.default_value[:]
+        if node.type == 'BSDF_TOON':
+            base_color = node.inputs['Color']
+            if base_color.is_linked:
+                linked_node = base_color.links[0].from_node
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    return (1.0, 0.5, 0.5, 1.0)
+            else:
+                return base_color.default_value[:]
     return (1.0, 1.0, 1.0, 1.0)
 
-def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath):
+def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, cube_mat_map=None):
     bb = [target_obj.matrix_world @ Vector(v) for v in target_obj.bound_box]
     min_x = min(v.x for v in bb)
     min_y = min(v.y for v in bb)
@@ -71,16 +65,29 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath):
     oy = min_y + cell_len * 0.5
     oz = min_z + cell_len * 0.5
     layers = [{} for _ in range(dz)]
+
     _log(f"[Voxelator] Building spritesheet from {len(cubes)} cubes; grid: {dx} {dy} {dz}")
-    for o in cubes:
-        loc = o.matrix_world.translation
-        ix = int(round((loc.x - ox) / cell_len))
-        iy = int(round((loc.y - oy) / cell_len))
-        iz = int(round((loc.z - oz) / cell_len))
-        if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
-            mat_slots = o.material_slots
-            color = _get_material_color(mat_slots) if mat_slots else (1.0, 1.0, 1.0, 1.0)
-            layers[iz][(ix, iy)] = color
+    if cube_mat_map:
+        cache = {}
+        for (ix, iy, iz), mat in cube_mat_map.items():
+            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
+                if mat:
+                    key = mat.name
+                    color = cache.get(key)
+                    if color is None:
+                        color = _get_color_from_material(mat)
+                        cache[key] = color
+                    layers[iz][(ix, iy)] = color
+    else:
+        for o in cubes:
+            color = (1.0, 1.0, 1.0, 1.0)
+            loc = o.matrix_world.translation
+            ix = int(round((loc.x - ox) / cell_len))
+            iy = int(round((loc.y - oy) / cell_len))
+            iz = int(round((loc.z - oz) / cell_len))
+            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
+                layers[iz][(ix, iy)] = color
+    
     tile = max(dx, dy)
     width = tile * dz
     height = tile
@@ -266,7 +273,7 @@ class OBJECT_OT_voxelize(Operator):
         elif not save_path.lower().endswith(".png"):
             save_path = save_path + ".png"
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, save_path)
+        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, save_path, cube_mat_map=cube_mat_map)
         _log("[Voxelator] Spritesheet saved")
 
         #remove the duplicated mesh, leaving behind the voxelized mesh
