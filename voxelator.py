@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Voxelator",
-    "author": "15shekels aka derpy.radio aka TITANDERP aka Ivan",
+    "author": "15shekels aka derpy.radio aka TITANDERP aka Ivan + forked by Flan",
     "version": (1, 2, 1),
-    "blender": (2, 93, 4),
+    "blender": (4, 5, 1),
     "location": "View3D > Object",
     "description": "Converts any mesh into a voxelized mesh made up by cubes",
     "warning": "",
@@ -26,9 +26,9 @@ from bpy.types import (
     PropertyGroup
 )
 
-LOG_FILE = bpy.path.abspath("//voxelator.log")
 def _log(msg):
     try:
+        LOG_FILE = bpy.path.abspath("//voxelator.log")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(str(msg) + "\n")
     except Exception:
