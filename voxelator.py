@@ -14,6 +14,8 @@ bl_info = {
 import bpy
 import os
 import time
+import math
+from collections import deque
 from mathutils import Vector, Matrix
 from bpy.props import (
     IntProperty,
@@ -120,6 +122,204 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, c
     img.file_format = 'PNG'
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
+
+def _plane_box_overlap(normal, vert, maxbox):
+    nx, ny, nz = normal
+    vx, vy, vz = vert
+    mx, my, mz = maxbox
+
+    if nx > 0.0:
+        vmin_x = -mx - vx
+        vmax_x = mx - vx
+    else:
+        vmin_x = mx - vx
+        vmax_x = -mx - vx
+
+    if ny > 0.0:
+        vmin_y = -my - vy
+        vmax_y = my - vy
+    else:
+        vmin_y = my - vy
+        vmax_y = -my - vy
+
+    if nz > 0.0:
+        vmin_z = -mz - vz
+        vmax_z = mz - vz
+    else:
+        vmin_z = mz - vz
+        vmax_z = -mz - vz
+
+    if (nx * vmin_x + ny * vmin_y + nz * vmin_z) > 0.0:
+        return False
+    if (nx * vmax_x + ny * vmax_y + nz * vmax_z) >= 0.0:
+        return True
+    return False
+
+def _tri_box_overlap(center, half_size, tri):
+    cx, cy, cz = center
+    hx, hy, hz = half_size
+    (ax, ay, az), (bx, by, bz), (cx2, cy2, cz2) = tri
+
+    v0x = ax - cx
+    v0y = ay - cy
+    v0z = az - cz
+    v1x = bx - cx
+    v1y = by - cy
+    v1z = bz - cz
+    v2x = cx2 - cx
+    v2y = cy2 - cy
+    v2z = cz2 - cz
+
+    e0x = v1x - v0x
+    e0y = v1y - v0y
+    e0z = v1z - v0z
+    e1x = v2x - v1x
+    e1y = v2y - v1y
+    e1z = v2z - v1z
+    e2x = v0x - v2x
+    e2y = v0y - v2y
+    e2z = v0z - v2z
+
+    def axis_test(axv, ayv, azv):
+        p0 = axv * v0x + ayv * v0y + azv * v0z
+        p1 = axv * v1x + ayv * v1y + azv * v1z
+        p2 = axv * v2x + ayv * v2y + azv * v2z
+        min_p = min(p0, p1, p2)
+        max_p = max(p0, p1, p2)
+        rad = hx * abs(axv) + hy * abs(ayv) + hz * abs(azv)
+        return not (min_p > rad or max_p < -rad)
+
+    axes = (
+        (0.0, -e0z, e0y), (e0z, 0.0, -e0x), (-e0y, e0x, 0.0),
+        (0.0, -e1z, e1y), (e1z, 0.0, -e1x), (-e1y, e1x, 0.0),
+        (0.0, -e2z, e2y), (e2z, 0.0, -e2x), (-e2y, e2x, 0.0),
+    )
+    for axv, ayv, azv in axes:
+        if not axis_test(axv, ayv, azv):
+            return False
+
+    min_x = min(v0x, v1x, v2x)
+    max_x = max(v0x, v1x, v2x)
+    if min_x > hx or max_x < -hx:
+        return False
+
+    min_y = min(v0y, v1y, v2y)
+    max_y = max(v0y, v1y, v2y)
+    if min_y > hy or max_y < -hy:
+        return False
+
+    min_z = min(v0z, v1z, v2z)
+    max_z = max(v0z, v1z, v2z)
+    if min_z > hz or max_z < -hz:
+        return False
+
+    nx = e0y * e1z - e0z * e1y
+    ny = e0z * e1x - e0x * e1z
+    nz = e0x * e1y - e0y * e1x
+    if not _plane_box_overlap((nx, ny, nz), (v0x, v0y, v0z), (hx, hy, hz)):
+        return False
+
+    return True
+
+def _flood_fill_outside(dx, dy, dz, shell):
+    outside = set()
+    q = deque()
+
+    def try_push(ix, iy, iz):
+        cell = (ix, iy, iz)
+        if cell in shell or cell in outside:
+            return
+        outside.add(cell)
+        q.append(cell)
+
+    for ix in range(dx):
+        for iy in range(dy):
+            try_push(ix, iy, 0)
+            try_push(ix, iy, dz - 1)
+    for ix in range(dx):
+        for iz in range(dz):
+            try_push(ix, 0, iz)
+            try_push(ix, dy - 1, iz)
+    for iy in range(dy):
+        for iz in range(dz):
+            try_push(0, iy, iz)
+            try_push(dx - 1, iy, iz)
+
+    neigh = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    while q:
+        ix, iy, iz = q.popleft()
+        for nx, ny, nz in neigh:
+            tx = ix + nx
+            ty = iy + ny
+            tz = iz + nz
+            if 0 <= tx < dx and 0 <= ty < dy and 0 <= tz < dz:
+                cell = (tx, ty, tz)
+                if cell not in shell and cell not in outside:
+                    outside.add(cell)
+                    q.append(cell)
+
+    return outside
+
+def _build_occupied_cells_from_mesh(target_obj, cell_len, ox, oy, oz, dx, dy, dz, fill_volume):
+    mesh = target_obj.data
+    mesh.calc_loop_triangles()
+    mat = target_obj.matrix_world
+    verts_w = [mat @ v.co for v in mesh.vertices]
+
+    half = 0.5 * cell_len
+    shell = set()
+    tris = mesh.loop_triangles
+    total_tris = len(tris)
+    step = max(1, total_tris // 10) if total_tris else 1
+
+    for ti, tri in enumerate(tris):
+        a = verts_w[tri.vertices[0]]
+        b = verts_w[tri.vertices[1]]
+        c = verts_w[tri.vertices[2]]
+        tri_pts = ((a.x, a.y, a.z), (b.x, b.y, b.z), (c.x, c.y, c.z))
+
+        min_x = min(a.x, b.x, c.x)
+        min_y = min(a.y, b.y, c.y)
+        min_z = min(a.z, b.z, c.z)
+        max_x = max(a.x, b.x, c.x)
+        max_y = max(a.y, b.y, c.y)
+        max_z = max(a.z, b.z, c.z)
+
+        ix0 = max(0, int(math.ceil((min_x - ox - half) / cell_len)))
+        iy0 = max(0, int(math.ceil((min_y - oy - half) / cell_len)))
+        iz0 = max(0, int(math.ceil((min_z - oz - half) / cell_len)))
+        ix1 = min(dx - 1, int(math.floor((max_x - ox + half) / cell_len)))
+        iy1 = min(dy - 1, int(math.floor((max_y - oy + half) / cell_len)))
+        iz1 = min(dz - 1, int(math.floor((max_z - oz + half) / cell_len)))
+
+        if ix1 < ix0 or iy1 < iy0 or iz1 < iz0:
+            continue
+
+        for ix in range(ix0, ix1 + 1):
+            cx = ox + ix * cell_len
+            for iy in range(iy0, iy1 + 1):
+                cy = oy + iy * cell_len
+                for iz in range(iz0, iz1 + 1):
+                    cz = oz + iz * cell_len
+                    if _tri_box_overlap((cx, cy, cz), (half, half, half), tri_pts):
+                        shell.add((ix, iy, iz))
+
+        if ((ti + 1) % step) == 0 or (ti + 1) == total_tris:
+            _log(f"[Voxelator] Surface voxelize {ti+1}/{total_tris}")
+
+    if not fill_volume:
+        return shell
+
+    outside = _flood_fill_outside(dx, dy, dz, shell)
+    occupied = set(shell)
+    for ix in range(dx):
+        for iy in range(dy):
+            for iz in range(dz):
+                cell = (ix, iy, iz)
+                if cell not in outside:
+                    occupied.add(cell)
+    _log(f"[Voxelator] Volume fill: shell={len(shell)} outside={len(outside)} total={len(occupied)}")
+    return occupied
 
 def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes):
     face_defs = (
@@ -248,39 +448,19 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] slices path: {self.slices_filepath or '(default)'}")
         _log(f"[Voxelator] log path: {LOG_FILE}")
 
-        bpy.ops.object.duplicate_move(OBJECT_OT_duplicate={"linked": False, "mode": 'TRANSLATION'})
-        context.object.name = source_name + "_voxelized"
-        bpy.ops.object.convert(target='MESH')
-        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-        target = context.object
-        target_name = target.name
+        depsgraph = context.evaluated_depsgraph_get()
+        source_eval = source.evaluated_get(depsgraph)
+        target_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+        target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
+        target.matrix_world = source.matrix_world.copy()
+        context.collection.objects.link(target)
         source.hide_set(True)
-        _log(f"[Voxelator] Duplicated & converted: {target_name}")
+        _log(f"[Voxelator] Built eval mesh object: {target.name}")
         _log(f"[Voxelator] Target dims: {target.dimensions[:]}")
-
-        bpy.ops.mesh.primitive_cube_add()
-        voxel_cube = context.object
-        voxel_cube.name = "voxel_cube"
 
         cube_size = max(target.dimensions) / (self.voxelizeResolution * 2)
         cell_len = cube_size * 2
         _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
-
-        target.modifiers.new(name='voxel system', type='PARTICLE_SYSTEM')
-        target_ps_settings = target.particle_systems[0].settings
-        target_ps_settings.count = 1
-        target_ps_settings.frame_end = 1
-        target_ps_settings.lifetime = 1
-        target_ps_settings.emit_from = 'VOLUME' if self.fill_volume else 'FACE'
-        target_ps_settings.distribution = 'GRID'
-        target_ps_settings.grid_resolution = self.voxelizeResolution
-        target_ps_settings.render_type = 'OBJECT'
-        target_ps_settings.instance_object = voxel_cube
-        target_ps_settings.use_scale_instance = False
-        target_ps_settings.show_unborn = True
-        target_ps_settings.use_dead = True
-        target_ps_settings.particle_size = cube_size
-        context.view_layer.update()
         _log(f"[Voxelator][Timing] Setup: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
@@ -296,26 +476,14 @@ class OBJECT_OT_voxelize(Operator):
         dy = max(1, int(round(target.dimensions[1] / cell_len)))
         dz = max(1, int(round(target.dimensions[2] / cell_len)))
 
-        depsgraph = context.evaluated_depsgraph_get()
-        eval_target = target.evaluated_get(depsgraph)
-        particles = eval_target.particle_systems[0].particles if eval_target.particle_systems else []
-
-        occupied = set()
-        n_particles = len(particles)
-        step_particles = max(1, n_particles // 10) if n_particles else 1
-        for i, particle in enumerate(particles):
-            wloc = eval_target.matrix_world @ particle.location
-            ix = int(round((wloc.x - ox) / cell_len))
-            iy = int(round((wloc.y - oy) / cell_len))
-            iz = int(round((wloc.z - oz) / cell_len))
-            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
-                occupied.add((ix, iy, iz))
-            if ((i + 1) % step_particles) == 0 or (i + 1) == n_particles:
-                _log(f"[Voxelator] Particle read {i+1}/{n_particles}")
+        surface_start = time.perf_counter()
+        occupied = _build_occupied_cells_from_mesh(target, cell_len, ox, oy, oz, dx, dy, dz, self.fill_volume)
+        _log(f"[Voxelator][Timing] Surface/volume voxelize: {time.perf_counter() - surface_start:.3f}s")
+        stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Grid: {dx}x{dy}x{dz}")
         _log(f"[Voxelator] Occupied cells: {len(occupied)}")
-        _log(f"[Voxelator][Timing] Occupancy: {time.perf_counter() - stage_start:.3f}s")
+        _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
         cube_mat_map = {}
@@ -358,7 +526,6 @@ class OBJECT_OT_voxelize(Operator):
         context.collection.objects.link(obj)
 
         bpy.data.objects.remove(target, do_unlink=True)
-        bpy.data.objects.remove(voxel_cube, do_unlink=True)
         _log("[Voxelator] Removed temp objects")
         _log(f"[Voxelator] New object: {obj.name}")
         _log(f"[Voxelator][Timing] Mesh build: {time.perf_counter() - stage_start:.3f}s")
