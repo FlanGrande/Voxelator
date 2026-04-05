@@ -13,7 +13,8 @@ bl_info = {
 
 import bpy
 import os
-from mathutils import Vector
+import time
+from mathutils import Vector, Matrix
 from bpy.props import (
     IntProperty,
     BoolProperty,
@@ -66,7 +67,8 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, c
     oz = min_z + cell_len * 0.5
     layers = [{} for _ in range(dz)]
 
-    _log(f"[Voxelator] Building spritesheet from {len(cubes)} cubes; grid: {dx} {dy} {dz}")
+    cube_count = len(cube_mat_map) if cube_mat_map else len(cubes)
+    _log(f"[Voxelator] Building spritesheet from {cube_count} cubes; grid: {dx} {dy} {dz}")
     if cube_mat_map:
         cache = {}
         for (ix, iy, iz), mat in cube_mat_map.items():
@@ -118,6 +120,58 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, c
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
 
+def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes):
+    face_defs = (
+        ((1, 0, 0), ((1, -1, -1), (1, -1, 1), (1, 1, 1), (1, 1, -1))),
+        ((-1, 0, 0), ((-1, -1, -1), (-1, 1, -1), (-1, 1, 1), (-1, -1, 1))),
+        ((0, 1, 0), ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1))),
+        ((0, -1, 0), ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1))),
+        ((0, 0, 1), ((-1, -1, 1), (-1, 1, 1), (1, 1, 1), (1, -1, 1))),
+        ((0, 0, -1), ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1))),
+    )
+
+    verts = []
+    faces = []
+    face_cells = []
+    vert_map = {}
+    half = 0.5 * cell_len
+
+    for cell in sorted(occupied_cells):
+        ix, iy, iz = cell
+        for normal, corners in face_defs:
+            nx, ny, nz = normal
+            if (not separate_cubes) and ((ix + nx, iy + ny, iz + nz) in occupied_cells):
+                continue
+
+            face = []
+            for sx, sy, sz in corners:
+                lx = 2 * ix + sx
+                ly = 2 * iy + sy
+                lz = 2 * iz + sz
+                key = (lx, ly, lz)
+
+                if separate_cubes:
+                    vx = ox + lx * half
+                    vy = oy + ly * half
+                    vz = oz + lz * half
+                    verts.append((vx, vy, vz))
+                    face.append(len(verts) - 1)
+                else:
+                    vi = vert_map.get(key)
+                    if vi is None:
+                        vx = ox + lx * half
+                        vy = oy + ly * half
+                        vz = oz + lz * half
+                        vi = len(verts)
+                        verts.append((vx, vy, vz))
+                        vert_map[key] = vi
+                    face.append(vi)
+
+            faces.append(face)
+            face_cells.append(cell)
+
+    return verts, faces, face_cells
+
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
     bl_idname = "object.voxelize"
@@ -166,185 +220,150 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "slices_filepath")
     
     def execute(self, context):
+        total_start = time.perf_counter()
+        stage_start = total_start
 
-        #set selected object as source
-        source_name = bpy.context.object.name
-        source = bpy.data.objects[source_name]
+        source = context.object
+        source_name = source.name
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] slices path: {self.slices_filepath or '(default)'}")
 
-        #create copy of object to perform 
-        bpy.ops.object.duplicate_move(OBJECT_OT_duplicate={"linked":False, "mode":'TRANSLATION'})
-        bpy.context.object.name = source_name + "_voxelized"
+        bpy.ops.object.duplicate_move(OBJECT_OT_duplicate={"linked": False, "mode": 'TRANSLATION'})
+        context.object.name = source_name + "_voxelized"
         bpy.ops.object.convert(target='MESH')
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-        _log(f"[Voxelator] Duplicated & converted: {bpy.context.object.name}")
-
-        #hide the original object
+        target = context.object
+        target_name = target.name
         source.hide_set(True)
-        _log("[Voxelator] Original hidden")
+        _log(f"[Voxelator] Duplicated & converted: {target_name}")
+        _log(f"[Voxelator] Target dims: {target.dimensions[:]}")
 
-        #rename the duplicated mesh
-        target_name = bpy.context.object.name
-        target = bpy.data.objects[target_name]
-        _log(f"[Voxelator] Target: {target_name} dims: {target.dimensions[:]}")
-
-        #create cube to be used for voxels
         bpy.ops.mesh.primitive_cube_add()
-        bpy.context.object.name = "voxel_cube"
-        _log("[Voxelator] Voxel cube added")
+        voxel_cube = context.object
+        voxel_cube.name = "voxel_cube"
 
-        #decide cube size based on resolution and size of original mesh
-        cube_size = max(target.dimensions) / (self.voxelizeResolution*2)
+        cube_size = max(target.dimensions) / (self.voxelizeResolution * 2)
         cell_len = cube_size * 2
         _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
 
-        #apply cube particles to duplicated mesh to create voxels
-        target.modifiers.new(name='voxel system',type='PARTICLE_SYSTEM')
+        target.modifiers.new(name='voxel system', type='PARTICLE_SYSTEM')
         target_ps_settings = target.particle_systems[0].settings
         target_ps_settings.count = 1
         target_ps_settings.frame_end = 1
         target_ps_settings.lifetime = 1
-        if self.fill_volume == True:
-            target_ps_settings.emit_from = 'VOLUME'
-        if self.fill_volume == False:
-            target_ps_settings.emit_from = 'FACE'
+        target_ps_settings.emit_from = 'VOLUME' if self.fill_volume else 'FACE'
         target_ps_settings.distribution = 'GRID'
         target_ps_settings.grid_resolution = self.voxelizeResolution
         target_ps_settings.render_type = 'OBJECT'
-        target_ps_settings.instance_object = bpy.data.objects["voxel_cube"]
+        target_ps_settings.instance_object = voxel_cube
         target_ps_settings.use_scale_instance = False
         target_ps_settings.show_unborn = True
         target_ps_settings.use_dead = True
         target_ps_settings.particle_size = cube_size
-        _log("[Voxelator] Particle system set")
+        context.view_layer.update()
+        _log(f"[Voxelator][Timing] Setup: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
 
-        bpy.context.scene.objects["voxel_cube"].select_set(False)
-        bpy.context.scene.objects[target_name].select_set(True)
-        existing_names = {o.name for o in bpy.context.scene.objects}
-        _log("[Voxelator] Instantiating particles...")
-
-        #create cubes from the particles
-        prefs = bpy.context.preferences
-        prev_undo = prefs.edit.use_global_undo
-        prefs.edit.use_global_undo = False
-        try:
-            bpy.ops.object.duplicates_make_real()
-        finally:
-            prefs.edit.use_global_undo = prev_undo
+        bb_map = [target.matrix_world @ Vector(v) for v in target.bound_box]
+        min_x = min(v.x for v in bb_map)
+        min_y = min(v.y for v in bb_map)
+        min_z = min(v.z for v in bb_map)
+        ox = min_x + cell_len * 0.5
+        oy = min_y + cell_len * 0.5
+        oz = min_z + cell_len * 0.5
 
         dx = max(1, int(round(target.dimensions[0] / cell_len)))
         dy = max(1, int(round(target.dimensions[1] / cell_len)))
         dz = max(1, int(round(target.dimensions[2] / cell_len)))
-        new_cubes = [o for o in bpy.context.scene.objects if o.name not in existing_names and o.type == 'MESH']
-        _log(f"[Voxelator] Grid: {dx}x{dy}x{dz}")
-        _log(f"[Voxelator] New cubes (mesh): {len(new_cubes)}")
-        
-        bb_map = [target.matrix_world @ Vector(v) for v in target.bound_box]
-        min_x_m = min(v.x for v in bb_map)
-        min_y_m = min(v.y for v in bb_map)
-        min_z_m = min(v.z for v in bb_map)
-        ox_m = min_x_m + cell_len * 0.5
-        oy_m = min_y_m + cell_len * 0.5
-        oz_m = min_z_m + cell_len * 0.5
-        cube_mat_map = {}
 
-        n = len(new_cubes)
-        step = max(1, n // 10)
-        for i, cube in enumerate(new_cubes):
-            cube_loc = cube.matrix_world.translation
-            result, location, normal, index = source.closest_point_on_mesh(source.matrix_world.inverted() @ cube_loc)
-            if result and index < len(source.data.polygons):
-                poly = source.data.polygons[index]
-                if poly.material_index < len(source.data.materials):
-                    mat = source.data.materials[poly.material_index]
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_target = target.evaluated_get(depsgraph)
+        particles = eval_target.particle_systems[0].particles if eval_target.particle_systems else []
+
+        occupied = set()
+        n_particles = len(particles)
+        step_particles = max(1, n_particles // 10) if n_particles else 1
+        for i, particle in enumerate(particles):
+            wloc = eval_target.matrix_world @ particle.location
+            ix = int(round((wloc.x - ox) / cell_len))
+            iy = int(round((wloc.y - oy) / cell_len))
+            iz = int(round((wloc.z - oz) / cell_len))
+            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
+                occupied.add((ix, iy, iz))
+            if ((i + 1) % step_particles) == 0 or (i + 1) == n_particles:
+                _log(f"[Voxelator] Particle read {i+1}/{n_particles}")
+
+        _log(f"[Voxelator] Grid: {dx}x{dy}x{dz}")
+        _log(f"[Voxelator] Occupied cells: {len(occupied)}")
+        _log(f"[Voxelator][Timing] Occupancy: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
+
+        cube_mat_map = {}
+        source_inv = source.matrix_world.inverted()
+        source_polys = source.data.polygons
+        source_mats = source.data.materials
+        occ_list = sorted(occupied)
+        n_occ = len(occ_list)
+        step_occ = max(1, n_occ // 10) if n_occ else 1
+        for i, (ix, iy, iz) in enumerate(occ_list):
+            cube_loc = Vector((ox + ix * cell_len, oy + iy * cell_len, oz + iz * cell_len))
+            result, location, normal, poly_index = source.closest_point_on_mesh(source_inv @ cube_loc)
+            if result and poly_index < len(source_polys):
+                poly = source_polys[poly_index]
+                if poly.material_index < len(source_mats):
+                    mat = source_mats[poly.material_index]
                     if mat:
-                        ix = int(round((cube_loc.x - ox_m) / cell_len))
-                        iy = int(round((cube_loc.y - oy_m) / cell_len))
-                        iz = int(round((cube_loc.z - oz_m) / cell_len))
                         cube_mat_map[(ix, iy, iz)] = mat
-            if ((i + 1) % step) == 0 or (i + 1) == n:
-                _log(f"[Voxelator] Material transfer {i+1}/{n}")
-        
+            if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
+                _log(f"[Voxelator] Material map {i+1}/{n_occ}")
+        _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
+
         save_path = self.slices_filepath.strip()
         if not save_path:
             save_path = bpy.path.abspath(f"//{source_name}_voxel_slices_{self.voxelizeResolution}.png")
         elif not save_path.lower().endswith(".png"):
             save_path = save_path + ".png"
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet(new_cubes, target, cell_len, dx, dy, dz, save_path, cube_mat_map=cube_mat_map)
-        _log("[Voxelator] Spritesheet saved")
+        _save_voxel_spritesheet([], target, cell_len, dx, dy, dz, save_path, cube_mat_map=cube_mat_map)
+        _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
 
-        #remove the duplicated mesh, leaving behind the voxelized mesh
-        bpy.data.objects.remove(bpy.data.objects[target_name], do_unlink=True)
-        _log("[Voxelator] Removed temp target")
-        #delete the original cube particle
-        bpy.data.objects.remove(bpy.data.objects["voxel_cube"], do_unlink=True)
-        _log("[Voxelator] Removed voxel_cube")
+        verts, faces, face_cells = _build_voxel_mesh_data(occupied, ox, oy, oz, cell_len, self.separate_cubes)
+        mesh_name = source_name + "_voxel_mesh"
+        mesh = bpy.data.meshes.new(mesh_name)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new(mesh_name, mesh)
+        context.collection.objects.link(obj)
 
-        #make one of the cubes selected active
-        bpy.context.view_layer.objects.active = bpy.context.selected_objects[0]
+        bpy.data.objects.remove(target, do_unlink=True)
+        bpy.data.objects.remove(voxel_cube, do_unlink=True)
+        _log("[Voxelator] Removed temp objects")
+        _log(f"[Voxelator] New object: {obj.name}")
+        _log(f"[Voxelator][Timing] Mesh build: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
 
-        #join the cubes into a single mesh
-        bpy.ops.object.join()
-        _log("[Voxelator] Cubes joined")
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
 
-        bpy.context.object.name = source_name + "_voxel_mesh"
-        _log(f"[Voxelator] New object: {bpy.context.object.name}")
-        
-        #join cubes together by vertice
-        bpy.ops.object.editmode_toggle()
-        if self.separate_cubes == False:
-            bpy.ops.mesh.remove_doubles()
-        bpy.ops.object.editmode_toggle()
-        _log("[Voxelator] Merge done" if self.separate_cubes == False else "[Voxelator] Kept cubes separate")
-        
-        #transfer the uv map from the source object to the new cube mesh
-        bpy.ops.object.modifier_add(type='DATA_TRANSFER')
-        bpy.context.object.modifiers["DataTransfer"].use_loop_data = True
-        bpy.context.object.modifiers["DataTransfer"].data_types_loops = {'UV'}
-        bpy.context.object.modifiers["DataTransfer"].loop_mapping = 'POLYINTERP_NEAREST'
-        bpy.context.object.modifiers["DataTransfer"].object = source
-        bpy.ops.object.datalayout_transfer(modifier="DataTransfer")
-        bpy.ops.object.modifier_apply(modifier="DataTransfer")
-        _log("[Voxelator] UV transfer applied")
-
-        #make sure each cube is exactly scaled to 1m
-        resize_value = 1 / (max(bpy.context.object.dimensions) / self.voxelizeResolution)
-        bpy.ops.transform.resize(value=(resize_value, resize_value, resize_value))
-        _log("[Voxelator] Resized to 1m cubes")
-
-        bpy.context.object.data.materials.clear()
-        #copy all materials from source object to cube mesh
+        obj.data.materials.clear()
         for mat_slot in source.material_slots:
             if mat_slot.material:
-                bpy.context.object.data.materials.append(mat_slot.material)
+                obj.data.materials.append(mat_slot.material)
         _log(f"[Voxelator] Materials appended: {sum(1 for s in source.material_slots if s.material)}")
 
-        obj = bpy.context.object
         mat_name_to_idx = {m.name: i for i, m in enumerate(obj.data.materials)}
-        bb_join = [obj.matrix_world @ Vector(v) for v in obj.bound_box]
-        min_x_j = min(v.x for v in bb_join)
-        min_y_j = min(v.y for v in bb_join)
-        min_z_j = min(v.z for v in bb_join)
-        cell_post = max(obj.dimensions) / self.voxelizeResolution if self.voxelizeResolution else 1.0
-        ox_j = min_x_j + cell_post * 0.5
-        oy_j = min_y_j + cell_post * 0.5
-        oz_j = min_z_j + cell_post * 0.5
-
         polys = obj.data.polygons
         total_p = len(polys)
-        step_p = max(1, total_p // 10)
-        m3 = obj.matrix_world.to_3x3()
+        step_p = max(1, total_p // 10) if total_p else 1
         for pi, poly in enumerate(polys):
-            wc = obj.matrix_world @ poly.center
-            wn = (m3 @ poly.normal).normalized()
-            vc = wc - wn * (cell_post * 0.5)
-            ix = int(round((vc.x - ox_j) / cell_post))
-            iy = int(round((vc.y - oy_j) / cell_post))
-            iz = int(round((vc.z - oz_j) / cell_post))
-            mat = cube_mat_map.get((ix, iy, iz))
+            if pi >= len(face_cells):
+                break
+            mat = cube_mat_map.get(face_cells[pi])
             if mat:
                 idx = mat_name_to_idx.get(mat.name, -1)
                 if idx != -1:
@@ -352,44 +371,84 @@ class OBJECT_OT_voxelize(Operator):
             if ((pi + 1) % step_p) == 0 or (pi + 1) == total_p:
                 _log(f"[Voxelator] Face material assign {pi+1}/{total_p}")
 
-        #shrink uvs so each face is filled with one color
-        bpy.ops.object.editmode_toggle()
-        bpy.ops.mesh.select_mode(type='FACE')
-        bpy.context.area.ui_type = 'UV'
-        bpy.context.scene.tool_settings.use_uv_select_sync = False
-        if hasattr(bpy.context.space_data.uv_editor, "sticky_select_mode"):
-            bpy.context.space_data.uv_editor.sticky_select_mode = 'DISABLED'
-        bpy.context.scene.tool_settings.uv_select_mode = 'FACE'
-        bpy.context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
-        bpy.ops.mesh.select_all(action='DESELECT')
+        mod = obj.modifiers.new(name='DataTransfer', type='DATA_TRANSFER')
+        mod.use_loop_data = True
+        mod.data_types_loops = {'UV'}
+        mod.loop_mapping = 'POLYINTERP_NEAREST'
+        mod.object = source
+        bpy.ops.object.datalayout_transfer(modifier=mod.name)
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        _log("[Voxelator] UV transfer applied")
+        _log(f"[Voxelator][Timing] Materials + UV transfer: {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
+
+        max_dim = max(obj.dimensions)
+        if max_dim > 0:
+            resize_value = 1 / (max_dim / self.voxelizeResolution)
+            for v in obj.data.vertices:
+                v.co *= resize_value
+            obj.data.update()
+            _log("[Voxelator] Resized to 1m cubes")
+
         _log("[Voxelator] Shrinking UVs...")
+        uv_layer = obj.data.uv_layers.active
+        if uv_layer:
+            mesh = obj.data
+            polys = mesh.polygons
+            loops = mesh.loops
+            total_uv_polys = len(polys)
+            total_loops = len(loops)
+            step_uv = max(1, total_uv_polys // 10) if total_uv_polys else 1
 
-        count = 0
-        while count < 100:
-            bpy.ops.mesh.select_random(ratio=count*.01 + .01, seed=count)
-            bpy.ops.uv.select_all(action='SELECT')
-            bpy.ops.transform.resize(value=(0.00001, 0.00001, 0.00001))
-            bpy.ops.mesh.hide(unselected=False)
+            uv_flat = [0.0] * (total_loops * 2)
+            uv_layer.data.foreach_get("uv", uv_flat)
 
-            count+=1
-            if count % 20 == 0 or count == 100:
-                _log(f"[Voxelator] UV shrink {count}/100")
+            loop_starts = [0] * total_uv_polys
+            loop_totals = [0] * total_uv_polys
+            polys.foreach_get("loop_start", loop_starts)
+            polys.foreach_get("loop_total", loop_totals)
 
-        #revert ui areas
-        bpy.context.area.ui_type = 'VIEW_3D'
-        bpy.ops.mesh.reveal()
-        bpy.context.area.ui_type = 'VIEW_3D'
-        _log("[Voxelator] UV shrink done")
+            for pi in range(total_uv_polys):
+                start = loop_starts[pi]
+                count = loop_totals[pi]
+                if count <= 0:
+                    continue
 
-        bpy.ops.object.editmode_toggle()
+                sum_u = 0.0
+                sum_v = 0.0
+                end = start + count
+                for li in range(start, end):
+                    idx = li * 2
+                    sum_u += uv_flat[idx]
+                    sum_v += uv_flat[idx + 1]
 
-        #make sure new model is centered
-        bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
-        bpy.context.object.location[0] = 0
-        bpy.context.object.location[1] = 0
-        bpy.context.object.location[2] = 0
+                u = sum_u / count
+                v = sum_v / count
+                for li in range(start, end):
+                    idx = li * 2
+                    uv_flat[idx] = u
+                    uv_flat[idx + 1] = v
+
+                if ((pi + 1) % step_uv) == 0 or (pi + 1) == total_uv_polys:
+                    _log(f"[Voxelator] UV collapse {pi+1}/{total_uv_polys}")
+
+            uv_layer.data.foreach_set("uv", uv_flat)
+            mesh.update()
+            _log("[Voxelator] UV shrink done")
+        else:
+            _log("[Voxelator] UV shrink skipped (no active UV layer)")
+
+        bb = [v.co.copy() for v in obj.data.vertices]
+        if bb:
+            min_v = Vector((min(v.x for v in bb), min(v.y for v in bb), min(v.z for v in bb)))
+            max_v = Vector((max(v.x for v in bb), max(v.y for v in bb), max(v.z for v in bb)))
+            center = (min_v + max_v) * 0.5
+            obj.data.transform(Matrix.Translation(-center))
+            obj.data.update()
+        obj.location = (0.0, 0.0, 0.0)
         _log("[Voxelator] Centered at origin")
-
+        _log(f"[Voxelator][Timing] Finalize: {time.perf_counter() - stage_start:.3f}s")
+        _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
         _log("[Voxelator] Finished")
         return {'FINISHED'}
 
