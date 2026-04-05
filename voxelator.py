@@ -27,9 +27,10 @@ from bpy.types import (
     PropertyGroup
 )
 
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voxelator.log")
+
 def _log(msg):
     try:
-        LOG_FILE = bpy.path.abspath("//voxelator.log")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(str(msg) + "\n")
     except Exception:
@@ -204,6 +205,12 @@ class OBJECT_OT_voxelize(Operator):
         subtype='FILE_PATH',
         default=""
     )
+    log_filepath: bpy.props.StringProperty(
+        name="Log File",
+        description="Path to save processing log (.log)",
+        subtype='FILE_PATH',
+        default=""
+    )
     
     @classmethod
     def poll(cls, context):
@@ -218,16 +225,28 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
         layout.prop(self, "slices_filepath")
+        layout.prop(self, "log_filepath")
     
     def execute(self, context):
         total_start = time.perf_counter()
         stage_start = total_start
 
+        global LOG_FILE
         source = context.object
         source_name = source.name
+
+        log_path = self.log_filepath.strip()
+        if not log_path:
+            LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voxelator.log")
+        else:
+            if not log_path.lower().endswith(".log"):
+                log_path = log_path + ".log"
+            LOG_FILE = bpy.path.abspath(log_path)
+
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] slices path: {self.slices_filepath or '(default)'}")
+        _log(f"[Voxelator] log path: {LOG_FILE}")
 
         bpy.ops.object.duplicate_move(OBJECT_OT_duplicate={"linked": False, "mode": 'TRANSLATION'})
         context.object.name = source_name + "_voxelized"
