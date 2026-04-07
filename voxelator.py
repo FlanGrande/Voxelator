@@ -613,14 +613,12 @@ class OBJECT_OT_voxelize(Operator):
             frame_start = int(math.floor(action.frame_range[0]))
             frame_end = int(math.ceil(action.frame_range[1]))
             frame_step = max(1, int(self.frame_step))
-            frames = list(range(frame_start, frame_end + 1, frame_step))
+            frames = list(range(frame_start, frame_end, frame_step))
             if not frames:
                 frames = [frame_start]
-            elif frames[-1] != frame_end:
-                frames.append(frame_end)
 
             _log(f"[Voxelator] Animation export owner: {anim_owner.name}")
-            _log(f"[Voxelator] Animation range: {frame_start}..{frame_end} step={frame_step} sampled={len(frames)}")
+            _log(f"[Voxelator] Animation range: {frame_start}..{frame_end} (last frame excluded for looping) step={frame_step} sampled={len(frames)}")
 
             try:
                 bounds_start = time.perf_counter()
