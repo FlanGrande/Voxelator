@@ -20,7 +20,8 @@ from mathutils import Vector, Matrix
 from bpy.props import (
     IntProperty,
     BoolProperty,
-    StringProperty
+    StringProperty,
+    EnumProperty
 )
 from bpy.types import (
     AddonPreferences,
@@ -373,6 +374,61 @@ def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes)
 
     return verts, faces, face_cells
 
+def _animation_items_for_object(self, context):
+    obj = context.object if context else None
+    if not obj:
+        return [('NONE', 'No object selected', 'Select an object to list linked animations')]
+
+    linked_actions = {}
+
+    def add_linked_action(action):
+        if action:
+            linked_actions[action.name] = action
+
+    def add_from_anim_data(id_data):
+        if not id_data:
+            return
+        anim = getattr(id_data, "animation_data", None)
+        if not anim:
+            return
+
+        add_linked_action(anim.action)
+        for track in anim.nla_tracks:
+            for strip in track.strips:
+                add_linked_action(strip.action)
+
+    add_from_anim_data(obj)
+    add_from_anim_data(getattr(obj, "data", None))
+
+    shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
+    add_from_anim_data(shape_keys)
+
+    linked_armatures = []
+    if obj.parent and obj.parent.type == 'ARMATURE':
+        linked_armatures.append(obj.parent)
+    for mod in getattr(obj, "modifiers", []):
+        if mod.type == 'ARMATURE' and mod.object:
+            linked_armatures.append(mod.object)
+
+    seen_armatures = set()
+    for arm in linked_armatures:
+        if arm.name in seen_armatures:
+            continue
+        seen_armatures.add(arm.name)
+        add_from_anim_data(arm)
+        add_from_anim_data(getattr(arm, "data", None))
+
+    action_names = sorted(linked_actions.keys())
+    if not action_names:
+        return [('NONE', 'No animations found', 'No actions linked to selected object')]
+
+    items = []
+    for name in action_names:
+        label = f"{name} (Added manually)"
+        desc = f"Added manually for {obj.name}"
+        items.append((name, label, desc))
+    return items
+
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
     bl_idname = "object.voxelize"
@@ -399,6 +455,16 @@ class OBJECT_OT_voxelize(Operator):
         description="Keep cubes as separate meshes inside the same object.",
         default = False
     )
+    animation_action: bpy.props.EnumProperty(
+        name="Animation",
+        description="Select an animation compatible with the selected object",
+        items=_animation_items_for_object
+    )
+    slices_only: bpy.props.BoolProperty(
+        name="Slices Only",
+        description="Only export voxel slices PNG and skip building the voxel mesh",
+        default=False
+    )
     slices_filepath: bpy.props.StringProperty(
         name="Slices PNG",
         description="Path to save the voxel slice spritesheet (.png)",
@@ -424,6 +490,8 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "voxelizeResolution")
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
+        layout.prop(self, "animation_action")
+        layout.prop(self, "slices_only")
         layout.prop(self, "slices_filepath")
         layout.prop(self, "log_filepath")
     
@@ -445,6 +513,8 @@ class OBJECT_OT_voxelize(Operator):
 
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
+        _log(f"[Voxelator] animation: {self.animation_action}")
+        _log(f"[Voxelator] slices_only: {self.slices_only}")
         _log(f"[Voxelator] slices path: {self.slices_filepath or '(default)'}")
         _log(f"[Voxelator] log path: {LOG_FILE}")
 
@@ -454,7 +524,8 @@ class OBJECT_OT_voxelize(Operator):
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
         target.matrix_world = source.matrix_world.copy()
         context.collection.objects.link(target)
-        source.hide_set(True)
+        if not self.slices_only:
+            source.hide_set(True)
         _log(f"[Voxelator] Built eval mesh object: {target.name}")
         _log(f"[Voxelator] Target dims: {target.dimensions[:]}")
 
@@ -546,6 +617,14 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
         _save_voxel_spritesheet([], target, cell_len, dx, dy, dz, save_path, cube_mat_map=cube_mat_map)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
+
+        if self.slices_only:
+            bpy.data.objects.remove(target, do_unlink=True)
+            _log("[Voxelator] Slices-only mode: skipped voxel mesh build")
+            _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
+            _log("[Voxelator] Finished")
+            return {'FINISHED'}
+
         stage_start = time.perf_counter()
 
         verts, faces, face_cells = _build_voxel_mesh_data(occupied, ox, oy, oz, cell_len, self.separate_cubes)
