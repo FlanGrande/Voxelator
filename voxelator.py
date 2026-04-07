@@ -260,7 +260,7 @@ def _flood_fill_outside(dx, dy, dz, shell):
 
     return outside
 
-def _build_occupied_cells_from_mesh(target_obj, cell_len, ox, oy, oz, dx, dy, dz, fill_volume):
+def _build_occupied_cells_from_mesh(target_obj, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
     mesh = target_obj.data
     mesh.calc_loop_triangles()
     mat = target_obj.matrix_world
@@ -285,22 +285,22 @@ def _build_occupied_cells_from_mesh(target_obj, cell_len, ox, oy, oz, dx, dy, dz
         max_y = max(a.y, b.y, c.y)
         max_z = max(a.z, b.z, c.z)
 
-        ix0 = max(0, int(math.ceil((min_x - ox - half) / cell_len)))
-        iy0 = max(0, int(math.ceil((min_y - oy - half) / cell_len)))
-        iz0 = max(0, int(math.ceil((min_z - oz - half) / cell_len)))
-        ix1 = min(dx - 1, int(math.floor((max_x - ox + half) / cell_len)))
-        iy1 = min(dy - 1, int(math.floor((max_y - oy + half) / cell_len)))
-        iz1 = min(dz - 1, int(math.floor((max_z - oz + half) / cell_len)))
+        ix0 = max(0, int(math.floor((min_x - grid_min_x) / cell_len)) - 1)
+        iy0 = max(0, int(math.floor((min_y - grid_min_y) / cell_len)) - 1)
+        iz0 = max(0, int(math.floor((min_z - grid_min_z) / cell_len)) - 1)
+        ix1 = min(dx - 1, int(math.floor((max_x - grid_min_x) / cell_len)) + 1)
+        iy1 = min(dy - 1, int(math.floor((max_y - grid_min_y) / cell_len)) + 1)
+        iz1 = min(dz - 1, int(math.floor((max_z - grid_min_z) / cell_len)) + 1)
 
         if ix1 < ix0 or iy1 < iy0 or iz1 < iz0:
             continue
 
         for ix in range(ix0, ix1 + 1):
-            cx = ox + ix * cell_len
+            cx = grid_min_x + (ix + 0.5) * cell_len
             for iy in range(iy0, iy1 + 1):
-                cy = oy + iy * cell_len
+                cy = grid_min_y + (iy + 0.5) * cell_len
                 for iz in range(iz0, iz1 + 1):
-                    cz = oz + iz * cell_len
+                    cz = grid_min_z + (iz + 0.5) * cell_len
                     if _tri_box_overlap((cx, cy, cz), (half, half, half), tri_pts):
                         shell.add((ix, iy, iz))
 
@@ -458,26 +458,46 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Built eval mesh object: {target.name}")
         _log(f"[Voxelator] Target dims: {target.dimensions[:]}")
 
-        cube_size = max(target.dimensions) / (self.voxelizeResolution * 2)
+        verts_world = [target.matrix_world @ v.co for v in target.data.vertices]
+        if not verts_world:
+            bpy.data.objects.remove(target, do_unlink=True)
+            _log("[Voxelator] Aborted: target has no vertices")
+            return {'CANCELLED'}
+        min_x = min(v.x for v in verts_world)
+        min_y = min(v.y for v in verts_world)
+        min_z = min(v.z for v in verts_world)
+        max_x = max(v.x for v in verts_world)
+        max_y = max(v.y for v in verts_world)
+        max_z = max(v.z for v in verts_world)
+
+        span_x = max_x - min_x
+        span_y = max_y - min_y
+        span_z = max_z - min_z
+        max_span = max(span_x, span_y, span_z)
+
+        cube_size = max_span / (self.voxelizeResolution * 2) if self.voxelizeResolution else 0.5
         cell_len = cube_size * 2
         _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
         _log(f"[Voxelator][Timing] Setup: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        bb_map = [target.matrix_world @ Vector(v) for v in target.bound_box]
-        min_x = min(v.x for v in bb_map)
-        min_y = min(v.y for v in bb_map)
-        min_z = min(v.z for v in bb_map)
-        ox = min_x + cell_len * 0.5
-        oy = min_y + cell_len * 0.5
-        oz = min_z + cell_len * 0.5
+        grid_min_x = min_x - cell_len
+        grid_min_y = min_y - cell_len
+        grid_min_z = min_z - cell_len
+        grid_max_x = max_x + cell_len
+        grid_max_y = max_y + cell_len
+        grid_max_z = max_z + cell_len
 
-        dx = max(1, int(round(target.dimensions[0] / cell_len)))
-        dy = max(1, int(round(target.dimensions[1] / cell_len)))
-        dz = max(1, int(round(target.dimensions[2] / cell_len)))
+        dx = max(1, int(math.ceil((grid_max_x - grid_min_x) / cell_len)))
+        dy = max(1, int(math.ceil((grid_max_y - grid_min_y) / cell_len)))
+        dz = max(1, int(math.ceil((grid_max_z - grid_min_z) / cell_len)))
+
+        ox = grid_min_x + 0.5 * cell_len
+        oy = grid_min_y + 0.5 * cell_len
+        oz = grid_min_z + 0.5 * cell_len
 
         surface_start = time.perf_counter()
-        occupied = _build_occupied_cells_from_mesh(target, cell_len, ox, oy, oz, dx, dy, dz, self.fill_volume)
+        occupied = _build_occupied_cells_from_mesh(target, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
         _log(f"[Voxelator][Timing] Surface/volume voxelize: {time.perf_counter() - surface_start:.3f}s")
         stage_start = time.perf_counter()
 
