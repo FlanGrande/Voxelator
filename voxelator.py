@@ -376,9 +376,6 @@ def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes)
 
 def _animation_items_for_object(self, context):
     obj = context.object if context else None
-    if not obj:
-        return [('NONE', 'No object selected', 'Select an object to list linked animations')]
-
     linked_actions = {}
 
     def add_linked_action(action):
@@ -397,35 +394,40 @@ def _animation_items_for_object(self, context):
             for strip in track.strips:
                 add_linked_action(strip.action)
 
-    add_from_anim_data(obj)
-    add_from_anim_data(getattr(obj, "data", None))
+    if obj:
+        add_from_anim_data(obj)
+        add_from_anim_data(getattr(obj, "data", None))
 
-    shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
-    add_from_anim_data(shape_keys)
+        shape_keys = getattr(getattr(obj, "data", None), "shape_keys", None)
+        add_from_anim_data(shape_keys)
 
-    linked_armatures = []
-    if obj.parent and obj.parent.type == 'ARMATURE':
-        linked_armatures.append(obj.parent)
-    for mod in getattr(obj, "modifiers", []):
-        if mod.type == 'ARMATURE' and mod.object:
-            linked_armatures.append(mod.object)
+        linked_armatures = []
+        if obj.parent and obj.parent.type == 'ARMATURE':
+            linked_armatures.append(obj.parent)
+        for mod in getattr(obj, "modifiers", []):
+            if mod.type == 'ARMATURE' and mod.object:
+                linked_armatures.append(mod.object)
 
-    seen_armatures = set()
-    for arm in linked_armatures:
-        if arm.name in seen_armatures:
-            continue
-        seen_armatures.add(arm.name)
-        add_from_anim_data(arm)
-        add_from_anim_data(getattr(arm, "data", None))
+        seen_armatures = set()
+        for arm in linked_armatures:
+            if arm.name in seen_armatures:
+                continue
+            seen_armatures.add(arm.name)
+            add_from_anim_data(arm)
+            add_from_anim_data(getattr(arm, "data", None))
 
-    action_names = sorted(linked_actions.keys())
+    action_names = sorted(action.name for action in bpy.data.actions)
     if not action_names:
-        return [('NONE', 'No animations found', 'No actions linked to selected object')]
+        return [('NONE', 'No animations found', 'No actions available in this project')]
 
     items = []
     for name in action_names:
-        label = f"{name} (Added manually)"
-        desc = f"Added manually for {obj.name}"
+        if name in linked_actions:
+            label = f"{name} (Added manually)"
+            desc = f"Action currently linked in NLA/animation data"
+        else:
+            label = f"{name} (Detected)"
+            desc = f"Action available in this project"
         items.append((name, label, desc))
     return items
 
@@ -457,7 +459,7 @@ class OBJECT_OT_voxelize(Operator):
     )
     animation_action: bpy.props.EnumProperty(
         name="Animation",
-        description="Select an animation compatible with the selected object",
+        description="Select an animation available in this project",
         items=_animation_items_for_object
     )
     slices_only: bpy.props.BoolProperty(
