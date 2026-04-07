@@ -481,16 +481,27 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Setup: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        grid_min_x = min_x - cell_len
-        grid_min_y = min_y - cell_len
-        grid_min_z = min_z - cell_len
-        grid_max_x = max_x + cell_len
-        grid_max_y = max_y + cell_len
-        grid_max_z = max_z + cell_len
+        grid_min_x = min_x
+        grid_min_y = min_y
+        grid_min_z = min_z
 
-        dx = max(1, int(math.ceil((grid_max_x - grid_min_x) / cell_len)))
-        dy = max(1, int(math.ceil((grid_max_y - grid_min_y) / cell_len)))
-        dz = max(1, int(math.ceil((grid_max_z - grid_min_z) / cell_len)))
+        eps = cell_len * 1e-6
+        tol = max_span * 1e-6 if max_span > 0.0 else 0.0
+
+        if abs(span_x - max_span) <= tol:
+            dx = max(1, int(self.voxelizeResolution))
+        else:
+            dx = max(1, int(math.ceil((span_x + eps) / cell_len)))
+
+        if abs(span_y - max_span) <= tol:
+            dy = max(1, int(self.voxelizeResolution))
+        else:
+            dy = max(1, int(math.ceil((span_y + eps) / cell_len)))
+
+        if abs(span_z - max_span) <= tol:
+            dz = max(1, int(self.voxelizeResolution))
+        else:
+            dz = max(1, int(math.ceil((span_z + eps) / cell_len)))
 
         ox = grid_min_x + 0.5 * cell_len
         oy = grid_min_y + 0.5 * cell_len
