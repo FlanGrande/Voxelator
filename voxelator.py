@@ -61,39 +61,46 @@ def _get_color_from_material(mat):
                 return base_color.default_value[:]
     return (1.0, 1.0, 1.0, 1.0)
 
-def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, cube_mat_map=None):
-    bb = [target_obj.matrix_world @ Vector(v) for v in target_obj.bound_box]
-    min_x = min(v.x for v in bb)
-    min_y = min(v.y for v in bb)
-    min_z = min(v.z for v in bb)
-    ox = min_x + cell_len * 0.5
-    oy = min_y + cell_len * 0.5
-    oz = min_z + cell_len * 0.5
+def _build_layer_color_map(dx, dy, dz, cube_mat_map):
     layers = [{} for _ in range(dz)]
+    cache = {}
+    for (ix, iy, iz), mat in cube_mat_map.items():
+        if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz and mat:
+            key = mat.name
+            color = cache.get(key)
+            if color is None:
+                color = _get_color_from_material(mat)
+                cache[key] = color
+            layers[iz][(ix, iy)] = color
+    return layers
 
-    cube_count = len(cube_mat_map) if cube_mat_map else len(cubes)
+def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=1, row_index=0, align_left=False):
+    tile = max(dx, dy)
+    off_x = 0 if align_left else (tile - dx) // 2
+    off_y = (tile - dy) // 2
+    row_bottom = (row_count - 1 - row_index) * tile
+    step_z = max(1, dz // 10)
+
+    for z in range(dz):
+        x0 = z * tile
+        for (ix, iy), color in layers[z].items():
+            px_x = x0 + off_x + ix
+            px_y = row_bottom + off_y + iy
+            if 0 <= px_x < width and 0 <= px_y < height:
+                idx = ((height - 1 - px_y) * width + px_x) * 4
+                px[idx] = color[0]
+                px[idx + 1] = color[1]
+                px[idx + 2] = color[2]
+                px[idx + 3] = color[3] if len(color) > 3 else 1.0
+        if row_count == 1 and (((z + 1) % step_z) == 0 or (z + 1) == dz):
+            _log(f"[Voxelator] Spritesheet fill {z+1}/{dz}")
+
+def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map):
+    layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
+
+    cube_count = len(cube_mat_map)
     _log(f"[Voxelator] Building spritesheet from {cube_count} cubes; grid: {dx} {dy} {dz}")
-    if cube_mat_map:
-        cache = {}
-        for (ix, iy, iz), mat in cube_mat_map.items():
-            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
-                if mat:
-                    key = mat.name
-                    color = cache.get(key)
-                    if color is None:
-                        color = _get_color_from_material(mat)
-                        cache[key] = color
-                    layers[iz][(ix, iy)] = color
-    else:
-        for o in cubes:
-            color = (1.0, 1.0, 1.0, 1.0)
-            loc = o.matrix_world.translation
-            ix = int(round((loc.x - ox) / cell_len))
-            iy = int(round((loc.y - oy) / cell_len))
-            iz = int(round((loc.z - oz) / cell_len))
-            if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz:
-                layers[iz][(ix, iy)] = color
-    
+
     tile = max(dx, dy)
     width = tile * dz
     height = tile
@@ -101,28 +108,37 @@ def _save_voxel_spritesheet(cubes, target_obj, cell_len, dx, dy, dz, filepath, c
     base = os.path.splitext(os.path.basename(abs_path))[0]
     img = bpy.data.images.new(f"voxel_slices_{base}", width=width, height=height, alpha=True, float_buffer=False)
     px = [0.0] * (width * height * 4)
-    off_x = (tile - dx) // 2
-    off_y = (tile - dy) // 2
     _log(f"[Voxelator] Spritesheet dimensions: {width} x {height}")
-    step_z = max(1, dz // 10)
-    for z in range(dz):
-        x0 = z * tile
-        for (ix, iy), color in layers[z].items():
-            px_x = x0 + off_x + ix
-            px_y = off_y + iy
-            if 0 <= px_x < width and 0 <= px_y < height:
-                idx = ((height - 1 - px_y) * width + px_x) * 4
-                px[idx] = color[0]
-                px[idx + 1] = color[1]
-                px[idx + 2] = color[2]
-                px[idx + 3] = color[3] if len(color) > 3 else 1.0
-        if ((z + 1) % step_z) == 0 or (z + 1) == dz:
-            _log(f"[Voxelator] Spritesheet fill {z+1}/{dz}")
+    _render_layers_into_pixels(px, width, height, layers, dx, dy, dz)
     img.pixels = px
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
+
+def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath):
+    frame_count = len(frame_cube_maps)
+    tile = max(dx, dy)
+    width = tile * dz
+    height = tile * frame_count
+    abs_path = bpy.path.abspath(filepath)
+    base = os.path.splitext(os.path.basename(abs_path))[0]
+    img = bpy.data.images.new(f"voxel_anim_slices_{base}", width=width, height=height, alpha=True, float_buffer=False)
+    px = [0.0] * (width * height * 4)
+
+    _log(f"[Voxelator] Building animation spritesheet frames={frame_count} grid={dx} {dy} {dz}")
+    _log(f"[Voxelator] Animation spritesheet dimensions: {width} x {height}")
+
+    for i, cube_mat_map in enumerate(frame_cube_maps):
+        layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
+        _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=frame_count, row_index=i, align_left=True)
+        _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
+
+    img.pixels = px
+    img.filepath_raw = abs_path
+    img.file_format = 'PNG'
+    img.save()
+    _log(f"[Voxelator] Saved animation spritesheet: {abs_path}")
 
 def _plane_box_overlap(normal, vert, maxbox):
     nx, ny, nz = normal
@@ -261,11 +277,9 @@ def _flood_fill_outside(dx, dy, dz, shell):
 
     return outside
 
-def _build_occupied_cells_from_mesh(target_obj, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
-    mesh = target_obj.data
+def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
     mesh.calc_loop_triangles()
-    mat = target_obj.matrix_world
-    verts_w = [mat @ v.co for v in mesh.vertices]
+    verts_w = [matrix_world @ v.co for v in mesh.vertices]
 
     half = 0.5 * cell_len
     shell = set()
@@ -431,6 +445,37 @@ def _animation_items_for_object(self, context):
         items.append((name, label, desc))
     return items
 
+def _get_animation_owner(obj):
+    if obj.parent and obj.parent.type == 'ARMATURE':
+        return obj.parent
+    for mod in getattr(obj, "modifiers", []):
+        if mod.type == 'ARMATURE' and mod.object:
+            return mod.object
+    return obj
+
+def _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len):
+    cube_mat_map = {}
+    source_inv = source.matrix_world.inverted()
+    source_polys = source.data.polygons
+    source_mats = source.data.materials
+    occ_list = sorted(occupied)
+    n_occ = len(occ_list)
+    step_occ = max(1, n_occ // 10) if n_occ else 1
+
+    for i, (ix, iy, iz) in enumerate(occ_list):
+        cube_loc = Vector((ox + ix * cell_len, oy + iy * cell_len, oz + iz * cell_len))
+        result, location, normal, poly_index = source.closest_point_on_mesh(source_inv @ cube_loc)
+        if result and poly_index < len(source_polys):
+            poly = source_polys[poly_index]
+            if poly.material_index < len(source_mats):
+                mat = source_mats[poly.material_index]
+                if mat:
+                    cube_mat_map[(ix, iy, iz)] = mat
+        if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
+            _log(f"[Voxelator] Material map {i+1}/{n_occ}")
+
+    return cube_mat_map
+
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
     bl_idname = "object.voxelize"
@@ -462,10 +507,21 @@ class OBJECT_OT_voxelize(Operator):
         description="Select an animation available in this project",
         items=_animation_items_for_object
     )
+    export_animation: bpy.props.BoolProperty(
+        name="Export Animation",
+        description="Export selected animation to a single stacked slices PNG",
+        default=False
+    )
+    frame_step: bpy.props.IntProperty(
+        name="Frame Step",
+        description="Use every Nth frame from selected animation",
+        default=1,
+        min=1
+    )
     slices_only: bpy.props.BoolProperty(
         name="Slices Only",
         description="Only export voxel slices PNG and skip building the voxel mesh",
-        default=False
+        default=True
     )
     slices_filepath: bpy.props.StringProperty(
         name="Slices PNG",
@@ -493,6 +549,9 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
         layout.prop(self, "animation_action")
+        layout.prop(self, "export_animation")
+        if self.export_animation:
+            layout.prop(self, "frame_step")
         layout.prop(self, "slices_only")
         layout.prop(self, "slices_filepath")
         layout.prop(self, "log_filepath")
@@ -516,11 +575,151 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] animation: {self.animation_action}")
+        _log(f"[Voxelator] export_animation: {self.export_animation} frame_step: {self.frame_step}")
         _log(f"[Voxelator] slices_only: {self.slices_only}")
         _log(f"[Voxelator] slices path: {self.slices_filepath or '(default)'}")
         _log(f"[Voxelator] log path: {LOG_FILE}")
 
+        save_path = self.slices_filepath.strip()
+        if not save_path:
+            save_path = bpy.path.abspath(f"//{source_name}_voxel_slices_{self.voxelizeResolution}.png")
+        elif not save_path.lower().endswith(".png"):
+            save_path = save_path + ".png"
+
         depsgraph = context.evaluated_depsgraph_get()
+
+        if self.export_animation:
+            if self.animation_action in {"", "NONE"}:
+                _log("[Voxelator] Aborted: no animation selected for export")
+                return {'CANCELLED'}
+
+            action = bpy.data.actions.get(self.animation_action)
+            if not action:
+                _log(f"[Voxelator] Aborted: animation not found: {self.animation_action}")
+                return {'CANCELLED'}
+
+            anim_owner = _get_animation_owner(source)
+            scene = context.scene
+            original_frame = scene.frame_current
+            created_anim_data = False
+            prev_action = None
+
+            if not anim_owner.animation_data:
+                anim_owner.animation_data_create()
+                created_anim_data = True
+            prev_action = anim_owner.animation_data.action
+            anim_owner.animation_data.action = action
+
+            frame_start = int(math.floor(action.frame_range[0]))
+            frame_end = int(math.ceil(action.frame_range[1]))
+            frame_step = max(1, int(self.frame_step))
+            frames = list(range(frame_start, frame_end + 1, frame_step))
+            if not frames:
+                frames = [frame_start]
+            elif frames[-1] != frame_end:
+                frames.append(frame_end)
+
+            _log(f"[Voxelator] Animation export owner: {anim_owner.name}")
+            _log(f"[Voxelator] Animation range: {frame_start}..{frame_end} step={frame_step} sampled={len(frames)}")
+
+            try:
+                bounds_start = time.perf_counter()
+                min_x = float('inf')
+                min_y = float('inf')
+                min_z = float('inf')
+                max_x = float('-inf')
+                max_y = float('-inf')
+                max_z = float('-inf')
+
+                for i, frame in enumerate(frames):
+                    scene.frame_set(frame)
+                    source_eval = source.evaluated_get(depsgraph)
+                    eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+                    verts_world = [source.matrix_world @ v.co for v in eval_mesh.vertices]
+                    bpy.data.meshes.remove(eval_mesh)
+                    if not verts_world:
+                        continue
+
+                    min_x = min(min_x, min(v.x for v in verts_world))
+                    min_y = min(min_y, min(v.y for v in verts_world))
+                    min_z = min(min_z, min(v.z for v in verts_world))
+                    max_x = max(max_x, max(v.x for v in verts_world))
+                    max_y = max(max_y, max(v.y for v in verts_world))
+                    max_z = max(max_z, max(v.z for v in verts_world))
+                    _log(f"[Voxelator] Animation bounds {i+1}/{len(frames)} frame={frame}")
+
+                if min_x == float('inf'):
+                    _log("[Voxelator] Aborted: no vertices found across sampled animation frames")
+                    return {'CANCELLED'}
+
+                span_x = max_x - min_x
+                span_y = max_y - min_y
+                span_z = max_z - min_z
+                max_span = max(span_x, span_y, span_z)
+
+                cube_size = max_span / (self.voxelizeResolution * 2) if self.voxelizeResolution else 0.5
+                cell_len = cube_size * 2
+                grid_min_x = min_x
+                grid_min_y = min_y
+                grid_min_z = min_z
+
+                eps = cell_len * 1e-6
+                tol = max_span * 1e-6 if max_span > 0.0 else 0.0
+
+                if abs(span_x - max_span) <= tol:
+                    dx = max(1, int(self.voxelizeResolution))
+                else:
+                    dx = max(1, int(math.ceil((span_x + eps) / cell_len)))
+
+                if abs(span_y - max_span) <= tol:
+                    dy = max(1, int(self.voxelizeResolution))
+                else:
+                    dy = max(1, int(math.ceil((span_y + eps) / cell_len)))
+
+                if abs(span_z - max_span) <= tol:
+                    dz = max(1, int(self.voxelizeResolution))
+                else:
+                    dz = max(1, int(math.ceil((span_z + eps) / cell_len)))
+
+                ox = grid_min_x + 0.5 * cell_len
+                oy = grid_min_y + 0.5 * cell_len
+                oz = grid_min_z + 0.5 * cell_len
+
+                _log(f"[Voxelator][Timing] Animation bounds prepass: {time.perf_counter() - bounds_start:.3f}s")
+                _log(f"[Voxelator] Global animation grid: {dx}x{dy}x{dz}")
+                _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
+
+                frame_cube_maps = []
+                anim_proc_start = time.perf_counter()
+                for i, frame in enumerate(frames):
+                    scene.frame_set(frame)
+                    source_eval = source.evaluated_get(depsgraph)
+                    eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+                    occupied = _build_occupied_cells_from_mesh(eval_mesh, source.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
+                    bpy.data.meshes.remove(eval_mesh)
+                    _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
+
+                    cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len)
+                    frame_cube_maps.append(cube_mat_map)
+                    _log(f"[Voxelator] Frame {frame}: mapped={len(cube_mat_map)} ({i+1}/{len(frames)})")
+
+                _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
+
+                _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
+                sprite_start = time.perf_counter()
+                _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, save_path)
+                _log(f"[Voxelator][Timing] Animation spritesheet: {time.perf_counter() - sprite_start:.3f}s")
+            finally:
+                scene.frame_set(original_frame)
+                if anim_owner.animation_data:
+                    anim_owner.animation_data.action = prev_action
+                if created_anim_data and anim_owner.animation_data and anim_owner.animation_data.action is None and not anim_owner.animation_data.nla_tracks:
+                    anim_owner.animation_data_clear()
+
+            _log("[Voxelator] Animation mode: PNG-only export complete")
+            _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
+            _log("[Voxelator] Finished")
+            return {'FINISHED'}
         source_eval = source.evaluated_get(depsgraph)
         target_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
@@ -581,7 +780,7 @@ class OBJECT_OT_voxelize(Operator):
         oz = grid_min_z + 0.5 * cell_len
 
         surface_start = time.perf_counter()
-        occupied = _build_occupied_cells_from_mesh(target, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
+        occupied = _build_occupied_cells_from_mesh(target.data, target.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
         _log(f"[Voxelator][Timing] Surface/volume voxelize: {time.perf_counter() - surface_start:.3f}s")
         stage_start = time.perf_counter()
 
@@ -590,34 +789,12 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        cube_mat_map = {}
-        source_inv = source.matrix_world.inverted()
-        source_polys = source.data.polygons
-        source_mats = source.data.materials
-        occ_list = sorted(occupied)
-        n_occ = len(occ_list)
-        step_occ = max(1, n_occ // 10) if n_occ else 1
-        for i, (ix, iy, iz) in enumerate(occ_list):
-            cube_loc = Vector((ox + ix * cell_len, oy + iy * cell_len, oz + iz * cell_len))
-            result, location, normal, poly_index = source.closest_point_on_mesh(source_inv @ cube_loc)
-            if result and poly_index < len(source_polys):
-                poly = source_polys[poly_index]
-                if poly.material_index < len(source_mats):
-                    mat = source_mats[poly.material_index]
-                    if mat:
-                        cube_mat_map[(ix, iy, iz)] = mat
-            if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
-                _log(f"[Voxelator] Material map {i+1}/{n_occ}")
+        cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len)
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        save_path = self.slices_filepath.strip()
-        if not save_path:
-            save_path = bpy.path.abspath(f"//{source_name}_voxel_slices_{self.voxelizeResolution}.png")
-        elif not save_path.lower().endswith(".png"):
-            save_path = save_path + ".png"
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet([], target, cell_len, dx, dy, dz, save_path, cube_mat_map=cube_mat_map)
+        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_mat_map)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
 
         if self.slices_only:
