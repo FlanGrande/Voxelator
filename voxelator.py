@@ -78,7 +78,7 @@ def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=
     tile = max(dx, dy)
     off_x = 0 if align_left else (tile - dx) // 2
     off_y = (tile - dy) // 2
-    row_bottom = (row_count - 1 - row_index) * tile
+    row_bottom = row_index * tile
     step_z = max(1, dz // 10)
 
     for z in range(dz):
@@ -482,7 +482,7 @@ class OBJECT_OT_voxelize(Operator):
     bl_description = "Converts any mesh into a voxelized mesh made up by cubes"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {'UNDO'}
     
     voxelizeResolution: bpy.props.IntProperty(
         name = "Voxel Resolution",
@@ -591,11 +591,13 @@ class OBJECT_OT_voxelize(Operator):
         if self.export_animation:
             if self.animation_action in {"", "NONE"}:
                 _log("[Voxelator] Aborted: no animation selected for export")
+                self.report({'ERROR'}, "Voxelator: no animation selected")
                 return {'CANCELLED'}
 
             action = bpy.data.actions.get(self.animation_action)
             if not action:
                 _log(f"[Voxelator] Aborted: animation not found: {self.animation_action}")
+                self.report({'ERROR'}, f"Voxelator: animation not found ({self.animation_action})")
                 return {'CANCELLED'}
 
             anim_owner = _get_animation_owner(source)
@@ -648,6 +650,7 @@ class OBJECT_OT_voxelize(Operator):
 
                 if min_x == float('inf'):
                     _log("[Voxelator] Aborted: no vertices found across sampled animation frames")
+                    self.report({'ERROR'}, "Voxelator: no vertices found in sampled animation")
                     return {'CANCELLED'}
 
                 span_x = max_x - min_x
@@ -717,6 +720,7 @@ class OBJECT_OT_voxelize(Operator):
             _log("[Voxelator] Animation mode: PNG-only export complete")
             _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
             _log("[Voxelator] Finished")
+            self.report({'INFO'}, f"Voxelator completed animation PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
         source_eval = source.evaluated_get(depsgraph)
         target_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
@@ -732,6 +736,7 @@ class OBJECT_OT_voxelize(Operator):
         if not verts_world:
             bpy.data.objects.remove(target, do_unlink=True)
             _log("[Voxelator] Aborted: target has no vertices")
+            self.report({'ERROR'}, "Voxelator: target has no vertices")
             return {'CANCELLED'}
         min_x = min(v.x for v in verts_world)
         min_y = min(v.y for v in verts_world)
@@ -800,6 +805,7 @@ class OBJECT_OT_voxelize(Operator):
             _log("[Voxelator] Slices-only mode: skipped voxel mesh build")
             _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
             _log("[Voxelator] Finished")
+            self.report({'INFO'}, f"Voxelator completed PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
 
         stage_start = time.perf_counter()
@@ -923,6 +929,7 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Finalize: {time.perf_counter() - stage_start:.3f}s")
         _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
         _log("[Voxelator] Finished")
+        self.report({'INFO'}, f"Voxelator completed mesh + PNG: {os.path.basename(save_path)}")
         return {'FINISHED'}
 
 def menu_func(self, context):
