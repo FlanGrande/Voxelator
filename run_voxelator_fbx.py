@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import os
 import sys
+import time
 
 import bpy
 
@@ -120,6 +121,7 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
         "frame_step": max(1, int(args.frame_step)),
         "slices_filepath": out_path,
         "log_filepath": args.log_path,
+        "console_progress": True,
     }
     if action_name and action_name in bpy.data.actions.keys():
         op_args["animation_action"] = action_name
@@ -177,11 +179,14 @@ def main():
         print("Detected imported actions: 0")
 
     if not bool(args.export_animation):
+        t0 = time.perf_counter()
+        print("[Voxelator CLI] Starting single-frame export...", flush=True)
         result = _run_voxelize(joined_mesh, out_path, args, export_animation=False, action_name="NONE")
         if "FINISHED" not in result:
             print(f"ERROR: Voxelator failed: {result}")
             return 4
-        print(f"Voxelator completed successfully: {out_path}")
+        dt = time.perf_counter() - t0
+        print(f"[Voxelator CLI] Completed in {dt:.2f}s: {out_path}")
         return 0
 
     if args.action.lower() == "all":
@@ -198,11 +203,16 @@ def main():
 
     success_paths = []
     failures = []
-    for action in actions_to_run:
+    total_actions = len(actions_to_run)
+    for idx, action in enumerate(actions_to_run, start=1):
         action_out = _out_path_for_action(out_path, action.name) if len(actions_to_run) > 1 else out_path
-        print(f"Exporting action '{action.name}' -> {action_out}")
+        print(f"[Voxelator CLI] Action {idx}/{total_actions}: '{action.name}'", flush=True)
+        print(f"[Voxelator CLI] Output: {action_out}", flush=True)
+        t0 = time.perf_counter()
         result = _run_voxelize(joined_mesh, action_out, args, export_animation=True, action_name=action.name)
         if "FINISHED" in result:
+            dt = time.perf_counter() - t0
+            print(f"[Voxelator CLI] Finished '{action.name}' in {dt:.2f}s", flush=True)
             success_paths.append(action_out)
         else:
             failures.append((action.name, str(result)))
