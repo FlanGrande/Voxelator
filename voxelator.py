@@ -31,6 +31,7 @@ from bpy.types import (
 )
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voxelator.log")
+LOG_TO_STDOUT = False
 
 def _log(msg):
     try:
@@ -38,6 +39,11 @@ def _log(msg):
             f.write(str(msg) + "\n")
     except Exception:
         pass
+    if LOG_TO_STDOUT:
+        try:
+            print(str(msg), flush=True)
+        except Exception:
+            pass
 
 def _get_color_from_material(mat):
     if not mat or not getattr(mat, "use_nodes", False):
@@ -535,6 +541,11 @@ class OBJECT_OT_voxelize(Operator):
         subtype='FILE_PATH',
         default=""
     )
+    console_progress: bpy.props.BoolProperty(
+        name="Console Progress",
+        description="Print progress logs to console",
+        default=False
+    )
     
     @classmethod
     def poll(cls, context):
@@ -561,8 +572,11 @@ class OBJECT_OT_voxelize(Operator):
         stage_start = total_start
 
         global LOG_FILE
+        global LOG_TO_STDOUT
         source = context.object
         source_name = source.name
+
+        LOG_TO_STDOUT = bool(self.console_progress)
 
         log_path = self.log_filepath.strip()
         if not log_path:
