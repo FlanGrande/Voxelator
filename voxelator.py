@@ -80,8 +80,8 @@ def _build_layer_color_map(dx, dy, dz, cube_mat_map):
             layers[iz][(ix, iy)] = color
     return layers
 
-def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=1, row_index=0, align_left=False):
-    tile = max(dx, dy)
+def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=None, row_count=1, row_index=0, align_left=False):
+    tile = int(tile_size) if tile_size is not None else max(dx, dy)
     off_x = 0 if align_left else (tile - dx) // 2
     off_y = (tile - dy) // 2
     row_bottom = row_index * tile
@@ -101,13 +101,15 @@ def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=
         if row_count == 1 and (((z + 1) % step_z) == 0 or (z + 1) == dz):
             _log(f"[Voxelator] Spritesheet fill {z+1}/{dz}")
 
-def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map):
+def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map, tile_size):
     layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
 
     cube_count = len(cube_mat_map)
     _log(f"[Voxelator] Building spritesheet from {cube_count} cubes; grid: {dx} {dy} {dz}")
 
-    tile = max(dx, dy)
+    tile = max(1, int(tile_size))
+    if dx > tile or dy > tile:
+        _log(f"[Voxelator] Warning: grid {dx}x{dy} exceeds tile {tile} and may clip")
     width = tile * dz
     height = tile
     abs_path = bpy.path.abspath(filepath)
@@ -115,16 +117,18 @@ def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map):
     img = bpy.data.images.new(f"voxel_slices_{base}", width=width, height=height, alpha=True, float_buffer=False)
     px = [0.0] * (width * height * 4)
     _log(f"[Voxelator] Spritesheet dimensions: {width} x {height}")
-    _render_layers_into_pixels(px, width, height, layers, dx, dy, dz)
+    _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile)
     img.pixels = px
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
 
-def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath):
+def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath, tile_size):
     frame_count = len(frame_cube_maps)
-    tile = max(dx, dy)
+    tile = max(1, int(tile_size))
+    if dx > tile or dy > tile:
+        _log(f"[Voxelator] Warning: grid {dx}x{dy} exceeds tile {tile} and may clip")
     width = tile * dz
     height = tile * frame_count
     abs_path = bpy.path.abspath(filepath)
@@ -137,7 +141,7 @@ def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath):
 
     for i, cube_mat_map in enumerate(frame_cube_maps):
         layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
-        _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=frame_count, row_index=i, align_left=False)
+        _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile, row_count=frame_count, row_index=i, align_left=False)
         _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
 
     img.pixels = px
@@ -744,7 +748,7 @@ class OBJECT_OT_voxelize(Operator):
 
                 _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
                 sprite_start = time.perf_counter()
-                _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, save_path)
+                _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, save_path, self.voxelizeResolution)
                 _log(f"[Voxelator][Timing] Animation spritesheet: {time.perf_counter() - sprite_start:.3f}s")
             finally:
                 scene.frame_set(original_frame)
@@ -842,7 +846,7 @@ class OBJECT_OT_voxelize(Operator):
         stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_mat_map)
+        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_mat_map, self.voxelizeResolution)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
 
         if self.slices_only:
