@@ -4,7 +4,7 @@
 Usage:
   blender -b -P run_voxelator_fbx.py -- \
     --fbx "/path/model.fbx" \
-    --out "/path/output.png" \
+    --out "output.png" \
     --res 64 --fill 0 --separate 0 \
     --export-animation 1 --action "All" --frame-step 2
 """
@@ -90,6 +90,35 @@ def _ensure_output_png(path):
     return path
 
 
+def _resolve_output_path(fbx_path, out_arg):
+    fbx_dir = os.path.dirname(os.path.abspath(fbx_path))
+    if not out_arg:
+        base = os.path.splitext(os.path.basename(fbx_path))[0]
+        return _ensure_output_png(os.path.join(fbx_dir, base + ".png"))
+
+    out_arg = out_arg.strip()
+    if os.path.dirname(out_arg):
+        return _ensure_output_png(os.path.abspath(out_arg))
+
+    return _ensure_output_png(os.path.join(fbx_dir, out_arg))
+
+
+def _resolve_log_path(fbx_path, log_arg, out_path):
+    fbx_dir = os.path.dirname(os.path.abspath(fbx_path))
+    if not log_arg:
+        base, _ = os.path.splitext(out_path)
+        return base + ".log"
+
+    log_arg = log_arg.strip()
+    if not log_arg.lower().endswith(".log"):
+        log_arg = log_arg + ".log"
+
+    if os.path.dirname(log_arg):
+        return os.path.abspath(log_arg)
+
+    return os.path.join(fbx_dir, log_arg)
+
+
 def _sanitize_name(text):
     safe = []
     for ch in text:
@@ -133,20 +162,20 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
 def main():
     parser = argparse.ArgumentParser(description="Import one FBX and run Voxelator")
     parser.add_argument("--fbx", required=True, help="Input FBX path")
-    parser.add_argument("--out", required=True, help="Output PNG path")
+    parser.add_argument("--out", default="", help="Output PNG path or filename (default: FBX folder)")
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (0/1)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (0/1)")
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animation mode (0/1)")
     parser.add_argument("--action", default="DefaultPose", help="Action name or 'All' for all detected FBX actions")
     parser.add_argument("--frame-step", type=int, default=1, help="Frame step for animation export (default: 1)")
-    parser.add_argument("--log", default="", help="Optional log file path")
+    parser.add_argument("--log", default="", help="Optional log file path or filename (default: alongside output)")
     args = parser.parse_args(_script_args(sys.argv))
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     fbx_path = os.path.abspath(args.fbx)
-    out_path = _ensure_output_png(os.path.abspath(args.out))
-    log_path = os.path.abspath(args.log) if args.log else ""
+    out_path = _resolve_output_path(fbx_path, args.out)
+    log_path = _resolve_log_path(fbx_path, args.log, out_path)
     args.log_path = log_path
 
     if not os.path.isfile(fbx_path):
@@ -171,6 +200,7 @@ def main():
     print(f"Imported FBX: {fbx_path}")
     print(f"Using mesh: {joined_mesh.name}")
     print(f"Base Output PNG: {out_path}")
+    print(f"Log File: {log_path}")
     if imported_actions:
         print(f"Detected imported actions ({len(imported_actions)}):")
         for action in sorted(imported_actions, key=lambda a: a.name):
