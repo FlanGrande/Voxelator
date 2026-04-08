@@ -1,0 +1,4 @@
+*.fbx
+*.log
+*.png
+/__pycache__/voxelator.cpython-314.pyc
