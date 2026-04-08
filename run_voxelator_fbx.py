@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -159,6 +160,18 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
     return result
 
 
+def _print_result(success, exported, failed, mode, outputs, error=""):
+    payload = {
+        "success": bool(success),
+        "exported": int(exported),
+        "failed": int(failed),
+        "mode": str(mode),
+        "outputs": list(outputs),
+        "error": str(error),
+    }
+    print("VOXELATOR_RESULT " + json.dumps(payload, ensure_ascii=True), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Import one FBX and run Voxelator")
     parser.add_argument("--fbx", required=True, help="Input FBX path")
@@ -180,6 +193,7 @@ def main():
 
     if not os.path.isfile(fbx_path):
         print(f"ERROR: FBX not found: {fbx_path}")
+        _print_result(False, 0, 0, "init", [], error=f"fbx_not_found:{fbx_path}")
         return 2
 
     _load_voxelator_operator(script_dir)
@@ -189,6 +203,7 @@ def main():
     mesh_objects = [o for o in imported_objects if o.type == "MESH"]
     if not mesh_objects:
         print("ERROR: No mesh objects found after FBX import")
+        _print_result(False, 0, 0, "import", [], error="no_mesh_objects")
         return 3
 
     joined_mesh = _join_meshes(mesh_objects)
@@ -214,20 +229,24 @@ def main():
         result = _run_voxelize(joined_mesh, out_path, args, export_animation=False, action_name="NONE")
         if "FINISHED" not in result:
             print(f"ERROR: Voxelator failed: {result}")
+            _print_result(False, 0, 1, "single", [], error=f"operator_failed:{result}")
             return 4
         dt = time.perf_counter() - t0
         print(f"[Voxelator CLI] Completed in {dt:.2f}s: {out_path}")
+        _print_result(True, 1, 0, "single", [out_path])
         return 0
 
     if args.action.lower() == "all":
         actions_to_run = sorted(imported_actions, key=lambda a: a.name)
         if not actions_to_run:
             print("ERROR: --action All requested, but no actions were imported from FBX")
+            _print_result(False, 0, 0, "animation", [], error="no_imported_actions")
             return 5
     else:
         selected = bpy.data.actions.get(args.action)
         if not selected:
             print(f"ERROR: action not found: {args.action}")
+            _print_result(False, 0, 0, "animation", [], error=f"action_not_found:{args.action}")
             return 6
         actions_to_run = [selected]
 
@@ -253,6 +272,8 @@ def main():
         print(f"  OK  {path}")
     for name, err in failures:
         print(f"  ERR {name}: {err}")
+
+    _print_result(bool(success_paths), len(success_paths), len(failures), "animation", success_paths, error="" if success_paths else "no_successful_actions")
 
     if not success_paths:
         return 7
