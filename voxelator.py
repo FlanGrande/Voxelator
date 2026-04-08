@@ -137,7 +137,7 @@ def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath):
 
     for i, cube_mat_map in enumerate(frame_cube_maps):
         layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
-        _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=frame_count, row_index=i, align_left=True)
+        _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, row_count=frame_count, row_index=i, align_left=False)
         _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
 
     img.pixels = px
@@ -459,9 +459,9 @@ def _get_animation_owner(obj):
             return mod.object
     return obj
 
-def _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len):
+def _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None):
     cube_mat_map = {}
-    source_inv = source.matrix_world.inverted()
+    source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
     source_polys = source.data.polygons
     source_mats = source.data.materials
     occ_list = sorted(occupied)
@@ -507,6 +507,14 @@ class OBJECT_OT_voxelize(Operator):
         name="Separate Cubes",
         description="Keep cubes as separate meshes inside the same object.",
         default = False
+    )
+    rotation_offset_deg: bpy.props.FloatProperty(
+        name="Rotation Offset Z",
+        description="Additional Z-axis rotation offset in degrees applied before voxelization",
+        default=0.0,
+        soft_min=-360.0,
+        soft_max=360.0,
+        step=10,
     )
     animation_action: bpy.props.EnumProperty(
         name="Animation",
@@ -559,6 +567,7 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "voxelizeResolution")
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
+        layout.prop(self, "rotation_offset_deg")
         layout.prop(self, "animation_action")
         layout.prop(self, "export_animation")
         if self.export_animation:
@@ -588,6 +597,7 @@ class OBJECT_OT_voxelize(Operator):
 
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
+        _log(f"[Voxelator] rotation_offset_deg: {self.rotation_offset_deg}")
         _log(f"[Voxelator] animation: {self.animation_action}")
         _log(f"[Voxelator] export_animation: {self.export_animation} frame_step: {self.frame_step}")
         _log(f"[Voxelator] slices_only: {self.slices_only}")
@@ -601,6 +611,8 @@ class OBJECT_OT_voxelize(Operator):
             save_path = save_path + ".png"
 
         depsgraph = context.evaluated_depsgraph_get()
+        rot_rad = math.radians(float(self.rotation_offset_deg))
+        rot_offset_matrix = Matrix.Rotation(rot_rad, 4, 'Z')
 
         if self.export_animation:
             if self.animation_action in {"", "NONE"}:
@@ -649,7 +661,8 @@ class OBJECT_OT_voxelize(Operator):
                     scene.frame_set(frame)
                     source_eval = source.evaluated_get(depsgraph)
                     eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
-                    verts_world = [source.matrix_world @ v.co for v in eval_mesh.vertices]
+                    processing_matrix = source.matrix_world @ rot_offset_matrix
+                    verts_world = [processing_matrix @ v.co for v in eval_mesh.vertices]
                     bpy.data.meshes.remove(eval_mesh)
                     if not verts_world:
                         continue
@@ -696,6 +709,13 @@ class OBJECT_OT_voxelize(Operator):
                 else:
                     dz = max(1, int(math.ceil((span_z + eps) / cell_len)))
 
+                center_x = (min_x + max_x) * 0.5
+                center_y = (min_y + max_y) * 0.5
+                center_z = (min_z + max_z) * 0.5
+                grid_min_x = center_x - (dx * cell_len) * 0.5
+                grid_min_y = center_y - (dy * cell_len) * 0.5
+                grid_min_z = center_z - (dz * cell_len) * 0.5
+
                 ox = grid_min_x + 0.5 * cell_len
                 oy = grid_min_y + 0.5 * cell_len
                 oz = grid_min_z + 0.5 * cell_len
@@ -703,6 +723,7 @@ class OBJECT_OT_voxelize(Operator):
                 _log(f"[Voxelator][Timing] Animation bounds prepass: {time.perf_counter() - bounds_start:.3f}s")
                 _log(f"[Voxelator] Global animation grid: {dx}x{dy}x{dz}")
                 _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
+                _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
                 frame_cube_maps = []
                 anim_proc_start = time.perf_counter()
@@ -710,11 +731,12 @@ class OBJECT_OT_voxelize(Operator):
                     scene.frame_set(frame)
                     source_eval = source.evaluated_get(depsgraph)
                     eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
-                    occupied = _build_occupied_cells_from_mesh(eval_mesh, source.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
+                    processing_matrix = source.matrix_world @ rot_offset_matrix
+                    occupied = _build_occupied_cells_from_mesh(eval_mesh, processing_matrix, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
                     bpy.data.meshes.remove(eval_mesh)
                     _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
 
-                    cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len)
+                    cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
                     frame_cube_maps.append(cube_mat_map)
                     _log(f"[Voxelator] Frame {frame}: mapped={len(cube_mat_map)} ({i+1}/{len(frames)})")
 
@@ -739,7 +761,8 @@ class OBJECT_OT_voxelize(Operator):
         source_eval = source.evaluated_get(depsgraph)
         target_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
-        target.matrix_world = source.matrix_world.copy()
+        processing_matrix = source.matrix_world @ rot_offset_matrix
+        target.matrix_world = processing_matrix
         context.collection.objects.link(target)
         if not self.slices_only:
             source.hide_set(True)
@@ -792,9 +815,17 @@ class OBJECT_OT_voxelize(Operator):
         else:
             dz = max(1, int(math.ceil((span_z + eps) / cell_len)))
 
+        center_x = (min_x + max_x) * 0.5
+        center_y = (min_y + max_y) * 0.5
+        center_z = (min_z + max_z) * 0.5
+        grid_min_x = center_x - (dx * cell_len) * 0.5
+        grid_min_y = center_y - (dy * cell_len) * 0.5
+        grid_min_z = center_z - (dz * cell_len) * 0.5
+
         ox = grid_min_x + 0.5 * cell_len
         oy = grid_min_y + 0.5 * cell_len
         oz = grid_min_z + 0.5 * cell_len
+        _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
         surface_start = time.perf_counter()
         occupied = _build_occupied_cells_from_mesh(target.data, target.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
@@ -806,7 +837,7 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len)
+        cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 

@@ -146,6 +146,7 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
         "voxelizeResolution": max(1, int(args.res)),
         "fill_volume": bool(args.fill),
         "separate_cubes": bool(args.separate),
+        "rotation_offset_deg": float(args.rot_offset),
         "slices_only": True,
         "export_animation": bool(export_animation),
         "frame_step": max(1, int(args.frame_step)),
@@ -179,6 +180,7 @@ def main():
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (0/1)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (0/1)")
+    parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animation mode (0/1)")
     parser.add_argument("--action", default="DefaultPose", help="Action name or 'All' for all detected FBX actions")
     parser.add_argument("--frame-step", type=int, default=1, help="Frame step for animation export (default: 1)")
