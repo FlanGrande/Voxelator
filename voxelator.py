@@ -46,37 +46,116 @@ def _log(msg):
             pass
 
 def _get_color_from_material(mat):
-    if not mat or not getattr(mat, "use_nodes", False):
+    if not mat:
         return (1.0, 1.0, 1.0, 1.0)
+    if not getattr(mat, "use_nodes", False):
+        if hasattr(mat, "diffuse_color"):
+            c = mat.diffuse_color
+            return (float(c[0]), float(c[1]), float(c[2]), float(c[3] if len(c) > 3 else 1.0))
+        return (1.0, 1.0, 1.0, 1.0)
+
     for node in mat.node_tree.nodes:
         if node.type == 'BSDF_PRINCIPLED':
-            base_color = node.inputs['Base Color']
-            if base_color.is_linked:
-                linked_node = base_color.links[0].from_node
-                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
-                    return (1.0, 0.5, 0.5, 1.0)
-            else:
-                return base_color.default_value[:]
+            return tuple(node.inputs['Base Color'].default_value[:])
         if node.type == 'BSDF_TOON':
-            base_color = node.inputs['Color']
-            if base_color.is_linked:
-                linked_node = base_color.links[0].from_node
-                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
-                    return (1.0, 0.5, 0.5, 1.0)
-            else:
-                return base_color.default_value[:]
+            return tuple(node.inputs['Color'].default_value[:])
     return (1.0, 1.0, 1.0, 1.0)
 
-def _build_layer_color_map(dx, dy, dz, cube_mat_map):
+def _get_material_color_source(mat, mat_source_cache):
+    cached = mat_source_cache.get(mat.name)
+    if cached is not None:
+        return cached
+
+    fallback = _get_color_from_material(mat)
+    source = ("solid", fallback)
+
+    if mat and getattr(mat, "use_nodes", False) and mat.node_tree:
+        socket = None
+        for node in mat.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                socket = node.inputs['Base Color']
+                fallback = tuple(socket.default_value[:])
+                break
+            if node.type == 'BSDF_TOON':
+                socket = node.inputs['Color']
+                fallback = tuple(socket.default_value[:])
+                break
+
+        if socket and socket.is_linked:
+            linked_node = socket.links[0].from_node
+            if linked_node.type == 'TEX_IMAGE' and linked_node.image and linked_node.image.size[0] > 0 and linked_node.image.size[1] > 0:
+                source = ("image", linked_node.image, fallback)
+            else:
+                source = ("solid", fallback)
+
+    mat_source_cache[mat.name] = source
+    return source
+
+def _sample_image_bilinear(image, uv, image_cache):
+    img_key = image.name
+    cached = image_cache.get(img_key)
+    if cached is None:
+        w = int(image.size[0])
+        h = int(image.size[1])
+        if w <= 0 or h <= 0:
+            return None
+        pixels = tuple(image.pixels[:])
+        cached = (w, h, pixels)
+        image_cache[img_key] = cached
+
+    w, h, pixels = cached
+    u = uv[0] % 1.0
+    v = uv[1] % 1.0
+
+    x = u * (w - 1)
+    y = v * (h - 1)
+    x0 = int(math.floor(x))
+    y0 = int(math.floor(y))
+    x1 = min(x0 + 1, w - 1)
+    y1 = min(y0 + 1, h - 1)
+    tx = x - x0
+    ty = y - y0
+
+    def px(ix, iy):
+        idx = (iy * w + ix) * 4
+        return (pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3])
+
+    c00 = px(x0, y0)
+    c10 = px(x1, y0)
+    c01 = px(x0, y1)
+    c11 = px(x1, y1)
+
+    out = [0.0, 0.0, 0.0, 0.0]
+    for i in range(4):
+        a = c00[i] * (1.0 - tx) + c10[i] * tx
+        b = c01[i] * (1.0 - tx) + c11[i] * tx
+        out[i] = a * (1.0 - ty) + b * ty
+    return tuple(out)
+
+def _estimate_face_uv(location_local, poly, uv_data, loops, verts):
+    sum_u = 0.0
+    sum_v = 0.0
+    sum_w = 0.0
+    eps = 1e-8
+    for li in poly.loop_indices:
+        vi = loops[li].vertex_index
+        vco = verts[vi].co
+        d = (location_local - vco).length
+        w = 1.0 / max(d, eps)
+        luv = uv_data[li].uv
+        sum_u += luv.x * w
+        sum_v += luv.y * w
+        sum_w += w
+
+    if sum_w <= eps:
+        first_uv = uv_data[poly.loop_indices[0]].uv
+        return (float(first_uv.x), float(first_uv.y))
+    return (sum_u / sum_w, sum_v / sum_w)
+
+def _build_layer_color_map(dx, dy, dz, cube_color_map):
     layers = [{} for _ in range(dz)]
-    cache = {}
-    for (ix, iy, iz), mat in cube_mat_map.items():
-        if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz and mat:
-            key = mat.name
-            color = cache.get(key)
-            if color is None:
-                color = _get_color_from_material(mat)
-                cache[key] = color
+    for (ix, iy, iz), color in cube_color_map.items():
+        if 0 <= ix < dx and 0 <= iy < dy and 0 <= iz < dz and color:
             layers[iz][(ix, iy)] = color
     return layers
 
@@ -101,10 +180,10 @@ def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=
         if row_count == 1 and (((z + 1) % step_z) == 0 or (z + 1) == dz):
             _log(f"[Voxelator] Spritesheet fill {z+1}/{dz}")
 
-def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map, tile_size):
-    layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
+def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_color_map, tile_size):
+    layers = _build_layer_color_map(dx, dy, dz, cube_color_map)
 
-    cube_count = len(cube_mat_map)
+    cube_count = len(cube_color_map)
     _log(f"[Voxelator] Building spritesheet from {cube_count} cubes; grid: {dx} {dy} {dz}")
 
     tile = max(1, int(tile_size))
@@ -124,8 +203,8 @@ def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_mat_map, tile_size):
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
 
-def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath, tile_size):
-    frame_count = len(frame_cube_maps)
+def _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, filepath, tile_size):
+    frame_count = len(frame_color_maps)
     tile = max(1, int(tile_size))
     if dx > tile or dy > tile:
         _log(f"[Voxelator] Warning: grid {dx}x{dy} exceeds tile {tile} and may clip")
@@ -139,8 +218,8 @@ def _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, filepath, til
     _log(f"[Voxelator] Building animation spritesheet frames={frame_count} grid={dx} {dy} {dz}")
     _log(f"[Voxelator] Animation spritesheet dimensions: {width} x {height}")
 
-    for i, cube_mat_map in enumerate(frame_cube_maps):
-        layers = _build_layer_color_map(dx, dy, dz, cube_mat_map)
+    for i, cube_color_map in enumerate(frame_color_maps):
+        layers = _build_layer_color_map(dx, dy, dz, cube_color_map)
         _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile, row_count=frame_count, row_index=i, align_left=False)
         _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
 
@@ -463,11 +542,19 @@ def _get_animation_owner(obj):
             return mod.object
     return obj
 
-def _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None):
+def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None):
     cube_mat_map = {}
+    cube_color_map = {}
     source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
     source_polys = source.data.polygons
     source_mats = source.data.materials
+    source_mesh = source.data
+    source_loops = source_mesh.loops
+    source_verts = source_mesh.vertices
+    uv_layer = source_mesh.uv_layers.active
+    uv_data = uv_layer.data if uv_layer else None
+    mat_source_cache = {}
+    image_cache = {}
     occ_list = sorted(occupied)
     n_occ = len(occ_list)
     step_occ = max(1, n_occ // 10) if n_occ else 1
@@ -481,10 +568,24 @@ def _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_
                 mat = source_mats[poly.material_index]
                 if mat:
                     cube_mat_map[(ix, iy, iz)] = mat
+
+                    source_info = _get_material_color_source(mat, mat_source_cache)
+                    if source_info[0] == "solid":
+                        cube_color_map[(ix, iy, iz)] = source_info[1]
+                    else:
+                        uv = None
+                        if uv_data and poly.loop_indices:
+                            uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts)
+
+                        if uv is None:
+                            cube_color_map[(ix, iy, iz)] = source_info[2]
+                        else:
+                            sampled = _sample_image_bilinear(source_info[1], uv, image_cache)
+                            cube_color_map[(ix, iy, iz)] = sampled if sampled is not None else source_info[2]
         if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
             _log(f"[Voxelator] Material map {i+1}/{n_occ}")
 
-    return cube_mat_map
+    return cube_mat_map, cube_color_map
 
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
@@ -729,7 +830,7 @@ class OBJECT_OT_voxelize(Operator):
                 _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
                 _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
-                frame_cube_maps = []
+                frame_color_maps = []
                 anim_proc_start = time.perf_counter()
                 for i, frame in enumerate(frames):
                     scene.frame_set(frame)
@@ -740,15 +841,15 @@ class OBJECT_OT_voxelize(Operator):
                     bpy.data.meshes.remove(eval_mesh)
                     _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
 
-                    cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
-                    frame_cube_maps.append(cube_mat_map)
-                    _log(f"[Voxelator] Frame {frame}: mapped={len(cube_mat_map)} ({i+1}/{len(frames)})")
+                    cube_mat_map, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+                    frame_color_maps.append(cube_color_map)
+                    _log(f"[Voxelator] Frame {frame}: mapped={len(cube_mat_map)} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
 
                 _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
 
                 _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
                 sprite_start = time.perf_counter()
-                _save_voxel_animation_spritesheet(frame_cube_maps, dx, dy, dz, save_path, self.voxelizeResolution)
+                _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, save_path, self.voxelizeResolution)
                 _log(f"[Voxelator][Timing] Animation spritesheet: {time.perf_counter() - sprite_start:.3f}s")
             finally:
                 scene.frame_set(original_frame)
@@ -841,12 +942,12 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        cube_mat_map = _build_cube_mat_map(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+        cube_mat_map, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_mat_map, self.voxelizeResolution)
+        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_color_map, self.voxelizeResolution)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
 
         if self.slices_only:
