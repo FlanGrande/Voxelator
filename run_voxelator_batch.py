@@ -122,6 +122,7 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     lines.append(f"Succeeded: {payload['succeeded']}")
     lines.append(f"Failed: {payload['failed']}")
     lines.append(f"Skipped: {payload['skipped']}")
+    lines.append(f"Cleaned files: {payload.get('cleaned_files', 0)}")
     lines.append("")
 
     if payload["failures"]:
@@ -141,6 +142,31 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _clean_generated_outputs(fbx: Path) -> list[Path]:
+    stem = fbx.stem
+    out_base = f"{stem}_all"
+    parent = fbx.parent
+
+    matches = []
+    matches.extend(parent.glob(f"{out_base}__*.png"))
+    matches.append(parent / f"{out_base}.log")
+    matches.append(parent / f"{out_base}.batch.log")
+
+    removed = []
+    seen = set()
+    for path in matches:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists() and path.is_file():
+            try:
+                path.unlink()
+                removed.append(path)
+            except Exception:
+                pass
+    return removed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Voxelator recursively on all FBX files")
     parser.add_argument("--input-dir", required=True, help="Root directory to scan recursively for FBX files")
@@ -155,6 +181,7 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true", help="Skip files with existing output pattern")
     parser.add_argument("--max-files", type=int, default=0, help="Optional cap for number of FBX files")
     parser.add_argument("--dry-run", action="store_true", help="Only list discovered files and exit")
+    parser.add_argument("--clean-output", action="store_true", help="Remove existing generated outputs before processing each FBX")
     parser.add_argument("--report-path", default="", help="Report file or directory path")
     parser.add_argument(
         "--python-site",
@@ -203,9 +230,17 @@ def main() -> int:
     failed = 0
     skipped = 0
     failures = []
+    cleaned_files = 0
 
     for idx, fbx in enumerate(fbx_files, start=1):
         rel = fbx.relative_to(input_dir)
+
+        if args.clean_output:
+            removed = _clean_generated_outputs(fbx)
+            cleaned_files += len(removed)
+            if removed:
+                print(f"[{idx}/{len(fbx_files)}] CLEAN {rel} removed={len(removed)}", flush=True)
+
         out_base = f"{fbx.stem}_all"
         action_pattern = f"{out_base}__*.png"
         existing_outputs = sorted(fbx.parent.glob(action_pattern))
@@ -302,6 +337,7 @@ def main() -> int:
         "succeeded": succeeded,
         "failed": failed,
         "skipped": skipped,
+        "cleaned_files": cleaned_files,
         "settings": {
             "res": args.res,
             "fill": args.fill,
@@ -310,6 +346,7 @@ def main() -> int:
             "action": args.action,
             "frame_step": args.frame_step,
             "skip_existing": args.skip_existing,
+            "clean_output": args.clean_output,
         },
         "failures": failures,
     }
@@ -322,6 +359,7 @@ def main() -> int:
     print(f"  Succeeded:  {succeeded}")
     print(f"  Failed:     {failed}")
     print(f"  Skipped:    {skipped}")
+    print(f"  Cleaned:    {cleaned_files}")
     print(f"  Report TXT: {report_txt}")
     print(f"  Report JSON:{report_json}")
 
