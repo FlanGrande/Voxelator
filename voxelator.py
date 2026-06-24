@@ -599,7 +599,7 @@ class OBJECT_OT_voxelize(Operator):
         name = "Voxel Resolution",
         default = 16,
         min = 1,
-        max = 250,
+        max = 1080,
         description = "Maximum amount of cubes used per axis of mesh. *warning*: amounts higher than 32 can result in long load times during voxelization.",
     )
     

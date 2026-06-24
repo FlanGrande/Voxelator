@@ -176,6 +176,7 @@ def main() -> int:
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (default: 0)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (default: 0)")
     parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
+    parser.add_argument("--export-animation", default=0, help="Export animations (default: 0)")
     parser.add_argument("--action", default="All", help="Action name or All (default: All)")
     parser.add_argument("--frame-step", type=int, default=1, help="Animation frame step (default: 1)")
     parser.add_argument("--skip-existing", action="store_true", help="Skip files with existing output pattern")
@@ -271,7 +272,7 @@ def main() -> int:
             "--rot-offset",
             str(args.rot_offset),
             "--export-animation",
-            "1",
+            str(args.export_animation),
             "--action",
             str(args.action),
             "--frame-step",
