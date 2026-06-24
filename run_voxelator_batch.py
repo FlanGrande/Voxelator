@@ -142,13 +142,25 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _clean_generated_outputs(fbx: Path) -> list[Path]:
+def _generated_output_paths(fbx: Path) -> list[Path]:
     stem = fbx.stem
     out_base = f"{stem}_all"
     parent = fbx.parent
 
     matches = []
-    matches.extend(parent.glob(f"{out_base}__*.png"))
+    single_output = parent / f"{out_base}.png"
+    if single_output.exists() and single_output.is_file():
+        matches.append(single_output)
+    matches.extend(p for p in parent.glob(f"{out_base}__*.png") if p.is_file())
+    return sorted(matches)
+
+
+def _clean_generated_outputs(fbx: Path) -> list[Path]:
+    stem = fbx.stem
+    out_base = f"{stem}_all"
+    parent = fbx.parent
+
+    matches = _generated_output_paths(fbx)
     matches.append(parent / f"{out_base}.log")
     matches.append(parent / f"{out_base}.batch.log")
 
@@ -176,7 +188,7 @@ def main() -> int:
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (default: 0)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (default: 0)")
     parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
-    parser.add_argument("--export-animation", default=0, help="Export animations (default: 0)")
+    parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animations (default: 0)")
     parser.add_argument("--action", default="All", help="Action name or All (default: All)")
     parser.add_argument("--frame-step", type=int, default=1, help="Animation frame step (default: 1)")
     parser.add_argument("--skip-existing", action="store_true", help="Skip files with existing output pattern")
@@ -243,8 +255,7 @@ def main() -> int:
                 print(f"[{idx}/{len(fbx_files)}] CLEAN {rel} removed={len(removed)}", flush=True)
 
         out_base = f"{fbx.stem}_all"
-        action_pattern = f"{out_base}__*.png"
-        existing_outputs = sorted(fbx.parent.glob(action_pattern))
+        existing_outputs = _generated_output_paths(fbx)
 
         if args.skip_existing and existing_outputs:
             skipped += 1
@@ -285,7 +296,7 @@ def main() -> int:
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         dt = time.perf_counter() - t0
 
-        generated = sorted(fbx.parent.glob(action_pattern))
+        generated = _generated_output_paths(fbx)
         runner_result = _parse_runner_result(run_log)
         exported = len(generated)
         if runner_result["found"]:
@@ -344,6 +355,7 @@ def main() -> int:
             "fill": args.fill,
             "separate": args.separate,
             "rot_offset": args.rot_offset,
+            "export_animation": args.export_animation,
             "action": args.action,
             "frame_step": args.frame_step,
             "skip_existing": args.skip_existing,
