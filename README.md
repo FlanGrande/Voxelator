@@ -135,9 +135,22 @@ python run_voxelator_batch.py \
   --frame-step 2
 ```
 
-The batch runner calls Blender once per FBX and writes logs next to each input file.
+The batch runner calls Blender once per FBX. PNG outputs go under `Output`, and per-FBX logs go under `Logs`.
 
-Batch output names also use each FBX parent folder name. If one folder contains multiple FBX files, later files are numbered by sorted filename.
+`Output` and `Logs` are deleted and recreated at the start of every non-dry batch run.
+
+Batch output names use each FBX parent folder name. If one folder contains multiple FBX files, later files are numbered by sorted filename.
+
+Examples:
+
+```text
+Output/Bikes/BlueGPBike/BlueGPBike.png
+Output/Bikes/GreenMotocrossBike/GreenMotocrossBike.png
+Output/Man1/Man1__Idle.png
+Output/Man1/Man1__Run.png
+Logs/Bikes/BlueGPBike/BlueGPBike.batch.log
+Logs/Bikes/BlueGPBike/BlueGPBike.log
+```
 
 ### Useful Batch Commands
 
@@ -153,7 +166,7 @@ Skip FBX files that already have generated PNGs:
 python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --skip-existing
 ```
 
-Delete old generated PNG/log outputs before processing:
+`Output` and `Logs` are always cleaned before processing. `--clean-output` is kept for compatibility and is no longer required:
 
 ```bash
 python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --clean-output
@@ -182,7 +195,7 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--skip-existing` | off | Skip FBX files with existing output PNGs. |
 | `--max-files` | `0` | Optional cap. `0` means no cap. |
 | `--dry-run` | off | List discovered FBX files and exit. |
-| `--clean-output` | off | Remove generated outputs before processing. |
+| `--clean-output` | off | Compatibility flag. `Output` and `Logs` are always cleaned. |
 | `--report-path` | input folder | Report file or report directory path. |
 | `--python-site` | `~/.local/lib/python3.14/site-packages` | Extra site-packages path for Blender subprocesses. |
 
@@ -190,8 +203,9 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 
 Batch runs create:
 
-- `<folder-name>.batch.log` or `<folder-name>_2.batch.log` next to each FBX.
-- `<folder-name>.log` or `<folder-name>_2.log` from Voxelator.
+- `Output/<source-folder>/<folder-name>.png` output PNGs.
+- `Logs/<source-folder>/<folder-name>.batch.log` runner logs.
+- `Logs/<source-folder>/<folder-name>.log` Voxelator logs.
 - `voxelator_batch_report_<timestamp>.txt` summary report.
 - `voxelator_batch_report_<timestamp>.json` machine-readable report.
 

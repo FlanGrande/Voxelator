@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -17,9 +18,31 @@ from datetime import datetime
 from pathlib import Path
 
 
-def _discover_fbx(input_dir: Path) -> list[Path]:
-    files = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".fbx"]
+def _discover_fbx(input_dir: Path, excluded_roots: tuple[Path, ...] = ()) -> list[Path]:
+    excluded = tuple(p.resolve() for p in excluded_roots)
+    files = []
+    for p in input_dir.rglob("*"):
+        if not p.is_file() or p.suffix.lower() != ".fbx":
+            continue
+        resolved = p.resolve()
+        if any(resolved == root or root in resolved.parents for root in excluded):
+            continue
+        files.append(p)
     return sorted(files)
+
+
+def _count_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for p in path.rglob("*") if p.is_file())
+
+
+def _reset_root(path: Path) -> int:
+    removed = _count_files(path)
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return removed
 
 
 def _report_paths(input_dir: Path, report_path_arg: str) -> tuple[Path, Path]:
@@ -115,6 +138,8 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     lines.append(f"Finished: {payload['finished_at']}")
     lines.append(f"Elapsed seconds: {payload['elapsed_seconds']:.2f}")
     lines.append(f"Input dir: {payload['input_dir']}")
+    lines.append(f"Output dir: {payload['output_dir']}")
+    lines.append(f"Logs dir: {payload['logs_dir']}")
     lines.append(f"Runner: {payload['runner']}")
     lines.append(f"Blender: {payload['blender']}")
     lines.append(f"Total discovered: {payload['total_discovered']}")
@@ -142,6 +167,13 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _relative_parent_for_output(fbx: Path, input_dir: Path, project_dir: Path) -> Path:
+    try:
+        return fbx.parent.relative_to(project_dir)
+    except ValueError:
+        return fbx.parent.relative_to(input_dir.parent)
+
+
 def _output_base_for_fbx(fbx: Path) -> str:
     folder_name = fbx.parent.name or fbx.stem
     siblings = sorted(p for p in fbx.parent.iterdir() if p.is_file() and p.suffix.lower() == ".fbx")
@@ -157,37 +189,13 @@ def _output_base_for_fbx(fbx: Path) -> str:
     return f"{folder_name}_{index + 1}"
 
 
-def _generated_output_paths(fbx: Path, out_base: str) -> list[Path]:
-    parent = fbx.parent
-
+def _generated_output_paths(output_dir: Path, out_base: str) -> list[Path]:
     matches = []
-    single_output = parent / f"{out_base}.png"
+    single_output = output_dir / f"{out_base}.png"
     if single_output.exists() and single_output.is_file():
         matches.append(single_output)
-    matches.extend(p for p in parent.glob(f"{out_base}__*.png") if p.is_file())
+    matches.extend(p for p in output_dir.glob(f"{out_base}__*.png") if p.is_file())
     return sorted(matches)
-
-
-def _clean_generated_outputs(fbx: Path, out_base: str) -> list[Path]:
-    parent = fbx.parent
-
-    matches = _generated_output_paths(fbx, out_base)
-    matches.append(parent / f"{out_base}.log")
-    matches.append(parent / f"{out_base}.batch.log")
-
-    removed = []
-    seen = set()
-    for path in matches:
-        if path in seen:
-            continue
-        seen.add(path)
-        if path.exists() and path.is_file():
-            try:
-                path.unlink()
-                removed.append(path)
-            except Exception:
-                pass
-    return removed
 
 
 def main() -> int:
@@ -205,7 +213,7 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true", help="Skip files with existing output pattern")
     parser.add_argument("--max-files", type=int, default=0, help="Optional cap for number of FBX files")
     parser.add_argument("--dry-run", action="store_true", help="Only list discovered files and exit")
-    parser.add_argument("--clean-output", action="store_true", help="Remove existing generated outputs before processing each FBX")
+    parser.add_argument("--clean-output", action="store_true", help="Compatibility flag; Output and Logs are always cleaned before processing")
     parser.add_argument("--report-path", default="", help="Report file or directory path")
     parser.add_argument(
         "--python-site",
@@ -213,6 +221,10 @@ def main() -> int:
         help="Extra site-packages path prepended to PYTHONPATH",
     )
     args = parser.parse_args()
+
+    project_dir = Path(__file__).resolve().parent
+    output_root = project_dir / "Output"
+    logs_root = project_dir / "Logs"
 
     input_dir = Path(args.input_dir).expanduser().resolve()
     if not input_dir.is_dir():
@@ -228,7 +240,7 @@ def main() -> int:
         print(f"ERROR: runner script not found: {runner}")
         return 3
 
-    fbx_files = _discover_fbx(input_dir)
+    fbx_files = _discover_fbx(input_dir, excluded_roots=(output_root, logs_root))
     if args.max_files > 0:
         fbx_files = fbx_files[: args.max_files]
 
@@ -237,6 +249,9 @@ def main() -> int:
         for f in fbx_files:
             print(f)
         return 0
+
+    cleaned_output_files = _reset_root(output_root)
+    cleaned_log_files = _reset_root(logs_root)
 
     report_txt, report_json = _report_paths(input_dir, args.report_path)
 
@@ -254,19 +269,18 @@ def main() -> int:
     failed = 0
     skipped = 0
     failures = []
-    cleaned_files = 0
+    cleaned_files = cleaned_output_files + cleaned_log_files
 
     for idx, fbx in enumerate(fbx_files, start=1):
         rel = fbx.relative_to(input_dir)
         out_base = _output_base_for_fbx(fbx)
+        rel_parent = _relative_parent_for_output(fbx, input_dir, project_dir)
+        output_dir = output_root / rel_parent
+        log_dir = logs_root / rel_parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.clean_output:
-            removed = _clean_generated_outputs(fbx, out_base)
-            cleaned_files += len(removed)
-            if removed:
-                print(f"[{idx}/{len(fbx_files)}] CLEAN {rel} removed={len(removed)}", flush=True)
-
-        existing_outputs = _generated_output_paths(fbx, out_base)
+        existing_outputs = _generated_output_paths(output_dir, out_base)
 
         if args.skip_existing and existing_outputs:
             skipped += 1
@@ -274,7 +288,9 @@ def main() -> int:
             continue
 
         processed += 1
-        run_log = fbx.parent / f"{out_base}.batch.log"
+        out_path = output_dir / f"{out_base}.png"
+        run_log = log_dir / f"{out_base}.batch.log"
+        voxel_log = log_dir / f"{out_base}.log"
         cmd = [
             args.blender,
             "-b",
@@ -284,7 +300,7 @@ def main() -> int:
             "--fbx",
             str(fbx),
             "--out",
-            f"{out_base}.png",
+            str(out_path),
             "--res",
             str(max(1, args.res)),
             "--fill",
@@ -299,6 +315,8 @@ def main() -> int:
             str(args.action),
             "--frame-step",
             str(max(1, args.frame_step)),
+            "--log",
+            str(voxel_log),
         ]
 
         print(f"[{idx}/{len(fbx_files)}] START {rel}", flush=True)
@@ -307,7 +325,7 @@ def main() -> int:
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         dt = time.perf_counter() - t0
 
-        generated = _generated_output_paths(fbx, out_base)
+        generated = _generated_output_paths(output_dir, out_base)
         runner_result = _parse_runner_result(run_log)
         exported = len(generated)
         if runner_result["found"]:
@@ -353,6 +371,8 @@ def main() -> int:
         "finished_at": finished_at,
         "elapsed_seconds": elapsed,
         "input_dir": str(input_dir),
+        "output_dir": str(output_root),
+        "logs_dir": str(logs_root),
         "runner": str(runner),
         "blender": args.blender,
         "total_discovered": len(fbx_files),
