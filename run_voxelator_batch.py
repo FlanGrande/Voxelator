@@ -142,9 +142,22 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _generated_output_paths(fbx: Path) -> list[Path]:
-    stem = fbx.stem
-    out_base = f"{stem}_all"
+def _output_base_for_fbx(fbx: Path) -> str:
+    folder_name = fbx.parent.name or fbx.stem
+    siblings = sorted(p for p in fbx.parent.iterdir() if p.is_file() and p.suffix.lower() == ".fbx")
+    if len(siblings) <= 1:
+        return folder_name
+
+    try:
+        index = siblings.index(fbx)
+    except ValueError:
+        return folder_name
+    if index == 0:
+        return folder_name
+    return f"{folder_name}_{index + 1}"
+
+
+def _generated_output_paths(fbx: Path, out_base: str) -> list[Path]:
     parent = fbx.parent
 
     matches = []
@@ -155,12 +168,10 @@ def _generated_output_paths(fbx: Path) -> list[Path]:
     return sorted(matches)
 
 
-def _clean_generated_outputs(fbx: Path) -> list[Path]:
-    stem = fbx.stem
-    out_base = f"{stem}_all"
+def _clean_generated_outputs(fbx: Path, out_base: str) -> list[Path]:
     parent = fbx.parent
 
-    matches = _generated_output_paths(fbx)
+    matches = _generated_output_paths(fbx, out_base)
     matches.append(parent / f"{out_base}.log")
     matches.append(parent / f"{out_base}.batch.log")
 
@@ -247,15 +258,15 @@ def main() -> int:
 
     for idx, fbx in enumerate(fbx_files, start=1):
         rel = fbx.relative_to(input_dir)
+        out_base = _output_base_for_fbx(fbx)
 
         if args.clean_output:
-            removed = _clean_generated_outputs(fbx)
+            removed = _clean_generated_outputs(fbx, out_base)
             cleaned_files += len(removed)
             if removed:
                 print(f"[{idx}/{len(fbx_files)}] CLEAN {rel} removed={len(removed)}", flush=True)
 
-        out_base = f"{fbx.stem}_all"
-        existing_outputs = _generated_output_paths(fbx)
+        existing_outputs = _generated_output_paths(fbx, out_base)
 
         if args.skip_existing and existing_outputs:
             skipped += 1
@@ -296,7 +307,7 @@ def main() -> int:
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
         dt = time.perf_counter() - t0
 
-        generated = _generated_output_paths(fbx)
+        generated = _generated_output_paths(fbx, out_base)
         runner_result = _parse_runner_result(run_log)
         exported = len(generated)
         if runner_result["found"]:

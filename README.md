@@ -69,20 +69,20 @@ Use Blender in background mode with `run_voxelator_fbx.py`:
 ```bash
 blender -b -P run_voxelator_fbx.py -- \
   --fbx "/path/to/model.fbx" \
-  --out "model_all.png" \
   --res 64 \
   --fill 0 \
   --separate 0
 ```
 
-If `--out` is only a filename, output is written next to the FBX file. If omitted, output defaults to `<fbx-name>.png` next to the FBX.
+If `--out` is only a filename, output is written next to the FBX file. If omitted, output defaults to the FBX parent folder name. For example, `/path/Bikes/BlueGPBike/model.fbx` writes `/path/Bikes/BlueGPBike/BlueGPBike.png`.
+
+If one folder contains multiple FBX files, later files are numbered by sorted filename: `BlueGPBike.png`, `BlueGPBike_2.png`, `BlueGPBike_3.png`.
 
 ### Export One Animation
 
 ```bash
 blender -b -P run_voxelator_fbx.py -- \
   --fbx "/path/to/character.fbx" \
-  --out "character_run.png" \
   --res 64 \
   --export-animation 1 \
   --action "Run" \
@@ -94,7 +94,6 @@ blender -b -P run_voxelator_fbx.py -- \
 ```bash
 blender -b -P run_voxelator_fbx.py -- \
   --fbx "/path/to/character.fbx" \
-  --out "character_all.png" \
   --res 64 \
   --export-animation 1 \
   --action All \
@@ -104,7 +103,7 @@ blender -b -P run_voxelator_fbx.py -- \
 When exporting multiple actions, output names become:
 
 ```text
-character_all__ActionName.png
+FolderName__ActionName.png
 ```
 
 ### Single Runner Options
@@ -112,7 +111,7 @@ character_all__ActionName.png
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--fbx` | required | Input FBX path. |
-| `--out` | FBX folder/name | Output PNG path or filename. |
+| `--out` | parent folder name | Output PNG path or filename. |
 | `--res` | `64` | Voxel resolution on longest axis. |
 | `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
@@ -137,6 +136,8 @@ python run_voxelator_batch.py \
 ```
 
 The batch runner calls Blender once per FBX and writes logs next to each input file.
+
+Batch output names also use each FBX parent folder name. If one folder contains multiple FBX files, later files are numbered by sorted filename.
 
 ### Useful Batch Commands
 
@@ -189,8 +190,8 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 
 Batch runs create:
 
-- `<fbx-stem>_all.batch.log` next to each FBX.
-- `<fbx-stem>_all.log` from Voxelator.
+- `<folder-name>.batch.log` or `<folder-name>_2.batch.log` next to each FBX.
+- `<folder-name>.log` or `<folder-name>_2.log` from Voxelator.
 - `voxelator_batch_report_<timestamp>.txt` summary report.
 - `voxelator_batch_report_<timestamp>.json` machine-readable report.
 

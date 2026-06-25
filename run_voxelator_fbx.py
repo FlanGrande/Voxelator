@@ -4,7 +4,6 @@
 Usage:
   blender -b -P run_voxelator_fbx.py -- \
     --fbx "/path/model.fbx" \
-    --out "output.png" \
     --res 64 --fill 0 --separate 0 \
     --export-animation 1 --action "All" --frame-step 2
 """
@@ -91,10 +90,30 @@ def _ensure_output_png(path):
     return path
 
 
+def _default_output_base_for_fbx(fbx_path):
+    fbx_dir = os.path.dirname(os.path.abspath(fbx_path))
+    folder_name = os.path.basename(fbx_dir) or os.path.splitext(os.path.basename(fbx_path))[0]
+    fbx_files = sorted(
+        os.path.join(fbx_dir, name)
+        for name in os.listdir(fbx_dir)
+        if name.lower().endswith(".fbx") and os.path.isfile(os.path.join(fbx_dir, name))
+    )
+    if len(fbx_files) <= 1:
+        return folder_name
+
+    try:
+        index = fbx_files.index(os.path.abspath(fbx_path))
+    except ValueError:
+        return folder_name
+    if index == 0:
+        return folder_name
+    return f"{folder_name}_{index + 1}"
+
+
 def _resolve_output_path(fbx_path, out_arg):
     fbx_dir = os.path.dirname(os.path.abspath(fbx_path))
     if not out_arg:
-        base = os.path.splitext(os.path.basename(fbx_path))[0]
+        base = _default_output_base_for_fbx(fbx_path)
         return _ensure_output_png(os.path.join(fbx_dir, base + ".png"))
 
     out_arg = out_arg.strip()
@@ -176,7 +195,7 @@ def _print_result(success, exported, failed, mode, outputs, error=""):
 def main():
     parser = argparse.ArgumentParser(description="Import one FBX and run Voxelator")
     parser.add_argument("--fbx", required=True, help="Input FBX path")
-    parser.add_argument("--out", default="", help="Output PNG path or filename (default: FBX folder)")
+    parser.add_argument("--out", default="", help="Output PNG path or filename (default: parent folder name)")
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (0/1)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (0/1)")
