@@ -17,6 +17,7 @@ import time
 import math
 from collections import deque
 from mathutils import Vector, Matrix
+from mathutils.bvhtree import BVHTree
 from bpy.props import (
     IntProperty,
     BoolProperty,
@@ -672,8 +673,8 @@ def _get_animation_owner(obj):
             return mod.object
     return obj
 
-def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None):
-    cube_mat_map = {}
+def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None):
+    mapped_count = 0
     cube_color_map = {}
     source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
     source_polys = source.data.polygons
@@ -682,35 +683,65 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     source_mesh.calc_loop_triangles()
     source_loops = source_mesh.loops
     source_verts = source_mesh.vertices
+    loop_tris = list(source_mesh.loop_triangles)
     uv_layer = source_mesh.uv_layers.active
     uv_data = uv_layer.data if uv_layer else None
     loop_tris_by_poly = {}
     if uv_data:
-        for loop_tri in source_mesh.loop_triangles:
+        for loop_tri in loop_tris:
             loop_tris_by_poly.setdefault(loop_tri.polygon_index, []).append(loop_tri)
-    mat_source_cache = {}
-    image_cache = {}
+    mat_source_cache = mat_source_cache if mat_source_cache is not None else {}
+    image_cache = image_cache if image_cache is not None else {}
+    bvh = None
+    if loop_tris:
+        try:
+            verts_local = [v.co.copy() for v in source_verts]
+            tri_indices = [tuple(loop_tri.vertices) for loop_tri in loop_tris]
+            bvh = BVHTree.FromPolygons(verts_local, tri_indices, all_triangles=True)
+        except Exception as exc:
+            _log(f"[Voxelator] BVH material lookup fallback: {exc}")
     occ_list = sorted(occupied)
     n_occ = len(occ_list)
     step_occ = max(1, n_occ // 10) if n_occ else 1
 
     for i, (ix, iy, iz) in enumerate(occ_list):
         cube_loc = Vector((ox + ix * cell_len, oy + iy * cell_len, oz + iz * cell_len))
-        result, location, normal, poly_index = source.closest_point_on_mesh(source_inv @ cube_loc)
-        if result and poly_index < len(source_polys):
-            poly = source_polys[poly_index]
+        local_loc = source_inv @ cube_loc
+        result = False
+        location = None
+        poly = None
+        loop_tri = None
+        if bvh:
+            nearest = bvh.find_nearest(local_loc)
+            if nearest and nearest[2] is not None:
+                location, normal, tri_index, distance = nearest
+                if 0 <= tri_index < len(loop_tris):
+                    loop_tri = loop_tris[tri_index]
+                    if loop_tri.polygon_index < len(source_polys):
+                        poly = source_polys[loop_tri.polygon_index]
+                        result = True
+        if not result:
+            result, location, normal, poly_index = source.closest_point_on_mesh(local_loc)
+            if result and poly_index < len(source_polys):
+                poly = source_polys[poly_index]
+        if result and poly is not None:
             if poly.material_index < len(source_mats):
                 mat = source_mats[poly.material_index]
                 if mat:
-                    cube_mat_map[(ix, iy, iz)] = mat
+                    mapped_count += 1
 
                     source_info = _get_material_color_source(mat, mat_source_cache)
                     if source_info[0] == "solid":
                         cube_color_map[(ix, iy, iz)] = source_info[1]
                     else:
                         uv = None
-                        if uv_data and poly.loop_indices:
-                            uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts, loop_tris_by_poly)
+                        if uv_data:
+                            if loop_tri is not None:
+                                tri_uv = _uv_from_triangle(location, loop_tri, uv_data, source_verts)
+                                if tri_uv is not None:
+                                    uv = (tri_uv[0], tri_uv[1])
+                            elif poly.loop_indices:
+                                uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts, loop_tris_by_poly)
 
                         if uv is None:
                             cube_color_map[(ix, iy, iz)] = source_info[2]
@@ -720,7 +751,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
         if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
             _log(f"[Voxelator] Material map {i+1}/{n_occ}")
 
-    return cube_mat_map, cube_color_map
+    return mapped_count, cube_color_map
 
 class OBJECT_OT_voxelize(Operator):
     bl_label = "Voxelate"
@@ -966,6 +997,8 @@ class OBJECT_OT_voxelize(Operator):
                 _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
                 frame_color_maps = []
+                anim_mat_source_cache = {}
+                anim_image_cache = {}
                 anim_proc_start = time.perf_counter()
                 for i, frame in enumerate(frames):
                     scene.frame_set(frame)
@@ -976,9 +1009,19 @@ class OBJECT_OT_voxelize(Operator):
                     bpy.data.meshes.remove(eval_mesh)
                     _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
 
-                    cube_mat_map, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+                    mapped_count, cube_color_map = _build_cube_maps(
+                        source,
+                        occupied,
+                        ox,
+                        oy,
+                        oz,
+                        cell_len,
+                        world_to_source_matrix=processing_matrix.inverted(),
+                        mat_source_cache=anim_mat_source_cache,
+                        image_cache=anim_image_cache,
+                    )
                     frame_color_maps.append(cube_color_map)
-                    _log(f"[Voxelator] Frame {frame}: mapped={len(cube_mat_map)} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
+                    _log(f"[Voxelator] Frame {frame}: mapped={mapped_count} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
 
                 _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
 
@@ -1077,7 +1120,8 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        cube_mat_map, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+        mapped_count, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+        _log(f"[Voxelator] Material mapped: {mapped_count} colorized: {len(cube_color_map)}")
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
@@ -1116,16 +1160,7 @@ class OBJECT_OT_voxelize(Operator):
 
         applied_faces = _apply_voxel_color_attribute(obj, face_cells, cube_color_map)
         _log(f"[Voxelator] Voxel colors applied: {applied_faces}")
-
-        mod = obj.modifiers.new(name='DataTransfer', type='DATA_TRANSFER')
-        mod.use_loop_data = True
-        mod.data_types_loops = {'UV'}
-        mod.loop_mapping = 'POLYINTERP_NEAREST'
-        mod.object = source
-        bpy.ops.object.datalayout_transfer(modifier=mod.name)
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-        _log("[Voxelator] UV transfer applied")
-        _log(f"[Voxelator][Timing] Materials + UV transfer: {time.perf_counter() - stage_start:.3f}s")
+        _log(f"[Voxelator][Timing] Voxel color attributes: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
         max_dim = max(obj.dimensions)
@@ -1135,54 +1170,6 @@ class OBJECT_OT_voxelize(Operator):
                 v.co *= resize_value
             obj.data.update()
             _log("[Voxelator] Resized to 1m cubes")
-
-        _log("[Voxelator] Shrinking UVs...")
-        uv_layer = obj.data.uv_layers.active
-        if uv_layer:
-            mesh = obj.data
-            polys = mesh.polygons
-            loops = mesh.loops
-            total_uv_polys = len(polys)
-            total_loops = len(loops)
-            step_uv = max(1, total_uv_polys // 10) if total_uv_polys else 1
-
-            uv_flat = [0.0] * (total_loops * 2)
-            uv_layer.data.foreach_get("uv", uv_flat)
-
-            loop_starts = [0] * total_uv_polys
-            loop_totals = [0] * total_uv_polys
-            polys.foreach_get("loop_start", loop_starts)
-            polys.foreach_get("loop_total", loop_totals)
-
-            for pi in range(total_uv_polys):
-                start = loop_starts[pi]
-                count = loop_totals[pi]
-                if count <= 0:
-                    continue
-
-                sum_u = 0.0
-                sum_v = 0.0
-                end = start + count
-                for li in range(start, end):
-                    idx = li * 2
-                    sum_u += uv_flat[idx]
-                    sum_v += uv_flat[idx + 1]
-
-                u = sum_u / count
-                v = sum_v / count
-                for li in range(start, end):
-                    idx = li * 2
-                    uv_flat[idx] = u
-                    uv_flat[idx + 1] = v
-
-                if ((pi + 1) % step_uv) == 0 or (pi + 1) == total_uv_polys:
-                    _log(f"[Voxelator] UV collapse {pi+1}/{total_uv_polys}")
-
-            uv_layer.data.foreach_set("uv", uv_flat)
-            mesh.update()
-            _log("[Voxelator] UV shrink done")
-        else:
-            _log("[Voxelator] UV shrink skipped (no active UV layer)")
 
         bb = [v.co.copy() for v in obj.data.vertices]
         if bb:
