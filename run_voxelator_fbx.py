@@ -4,7 +4,7 @@
 Usage:
   blender -b -P run_voxelator_fbx.py -- \
     --fbx "/path/model.fbx" \
-    --res 64 --fill 0 --separate 0 \
+    --res 64 --fill 0 --separate 0 --apply-modifiers 1 \
     --export-animation 1 --action "All" --frame-step 2
 """
 
@@ -165,6 +165,7 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
         "voxelizeResolution": max(1, int(args.res)),
         "fill_volume": bool(args.fill),
         "separate_cubes": bool(args.separate),
+        "apply_modifiers": bool(args.apply_modifiers),
         "rotation_offset_deg": float(args.rot_offset),
         "slices_only": True,
         "export_animation": bool(export_animation),
@@ -199,6 +200,7 @@ def main():
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (0/1)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (0/1)")
+    parser.add_argument("--apply-modifiers", type=int, choices=(0, 1), default=1, help="Apply modifiers before voxelizing (0/1, default: 1)")
     parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animation mode (0/1)")
     parser.add_argument("--action", default="DefaultPose", help="Action name or 'All' for all detected FBX actions")

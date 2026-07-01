@@ -206,6 +206,7 @@ def main() -> int:
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (default: 0)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (default: 0)")
+    parser.add_argument("--apply-modifiers", type=int, choices=(0, 1), default=1, help="Apply modifiers before voxelizing (default: 1)")
     parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animations (default: 0)")
     parser.add_argument("--action", default="All", help="Action name or All (default: All)")
@@ -307,6 +308,8 @@ def main() -> int:
             str(args.fill),
             "--separate",
             str(args.separate),
+            "--apply-modifiers",
+            str(args.apply_modifiers),
             "--rot-offset",
             str(args.rot_offset),
             "--export-animation",
@@ -385,6 +388,7 @@ def main() -> int:
             "res": args.res,
             "fill": args.fill,
             "separate": args.separate,
+            "apply_modifiers": args.apply_modifiers,
             "rot_offset": args.rot_offset,
             "export_animation": args.export_animation,
             "action": args.action,

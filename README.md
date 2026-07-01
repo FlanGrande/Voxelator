@@ -38,6 +38,7 @@ python -m pip install pillow
 - `Voxel Resolution` - number of cells on the longest mesh axis. Higher values create more detail but take much longer.
 - `Fill Volume` - fills interior voxels instead of only surface voxels.
 - `Separate Cubes` - keeps cubes split instead of sharing vertices inside one mesh.
+- `Apply Modifiers` - applies all object modifiers before voxelizing. Enabled by default.
 - `Rotation Offset Z` - rotates the model around Z before voxelization.
 - `Animation` - selects an action from the current Blender file.
 - `Export Animation` - exports selected animation frames to one stacked PNG.
@@ -71,7 +72,8 @@ blender -b -P run_voxelator_fbx.py -- \
   --fbx "/path/to/model.fbx" \
   --res 64 \
   --fill 0 \
-  --separate 0
+  --separate 0 \
+  --apply-modifiers 1
 ```
 
 If `--out` is only a filename, output is written next to the FBX file. If omitted, output defaults to the FBX parent folder name. For example, `/path/Bikes/BlueGPBike/model.fbx` writes `/path/Bikes/BlueGPBike/BlueGPBike.png`.
@@ -115,6 +117,7 @@ FolderName__ActionName.png
 | `--res` | `64` | Voxel resolution on longest axis. |
 | `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
+| `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animation spritesheet. |
 | `--action` | `DefaultPose` | Action name, or `All`. |
@@ -188,6 +191,7 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--res` | `64` | Voxel resolution. |
 | `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
+| `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animations. |
 | `--action` | `All` | Action name, or `All`. |

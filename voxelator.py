@@ -673,6 +673,14 @@ def _get_animation_owner(obj):
             return mod.object
     return obj
 
+def _mesh_from_source(source, depsgraph, apply_modifiers):
+    if apply_modifiers:
+        source_eval = source.evaluated_get(depsgraph)
+        return bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+    if source.type == 'MESH':
+        return source.data.copy()
+    return bpy.data.meshes.new_from_object(source, preserve_all_data_layers=True, depsgraph=depsgraph)
+
 def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None):
     mapped_count = 0
     cube_color_map = {}
@@ -779,6 +787,11 @@ class OBJECT_OT_voxelize(Operator):
         description="Keep cubes as separate meshes inside the same object.",
         default = False
     )
+    apply_modifiers: bpy.props.BoolProperty(
+        name="Apply Modifiers",
+        description="Voxelize the evaluated mesh with all modifiers applied",
+        default=True,
+    )
     rotation_offset_deg: bpy.props.FloatProperty(
         name="Rotation Offset Z",
         description="Additional Z-axis rotation offset in degrees applied before voxelization",
@@ -838,6 +851,7 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "voxelizeResolution")
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
+        layout.prop(self, "apply_modifiers")
         layout.prop(self, "rotation_offset_deg")
         layout.prop(self, "animation_action")
         layout.prop(self, "export_animation")
@@ -868,6 +882,7 @@ class OBJECT_OT_voxelize(Operator):
 
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
+        _log(f"[Voxelator] apply_modifiers: {self.apply_modifiers}")
         _log(f"[Voxelator] rotation_offset_deg: {self.rotation_offset_deg}")
         _log(f"[Voxelator] animation: {self.animation_action}")
         _log(f"[Voxelator] export_animation: {self.export_animation} frame_step: {self.frame_step}")
@@ -930,8 +945,7 @@ class OBJECT_OT_voxelize(Operator):
 
                 for i, frame in enumerate(frames):
                     scene.frame_set(frame)
-                    source_eval = source.evaluated_get(depsgraph)
-                    eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+                    eval_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
                     processing_matrix = source.matrix_world @ rot_offset_matrix
                     verts_world = [processing_matrix @ v.co for v in eval_mesh.vertices]
                     bpy.data.meshes.remove(eval_mesh)
@@ -1002,24 +1016,27 @@ class OBJECT_OT_voxelize(Operator):
                 anim_proc_start = time.perf_counter()
                 for i, frame in enumerate(frames):
                     scene.frame_set(frame)
-                    source_eval = source.evaluated_get(depsgraph)
-                    eval_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+                    eval_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
                     processing_matrix = source.matrix_world @ rot_offset_matrix
                     occupied = _build_occupied_cells_from_mesh(eval_mesh, processing_matrix, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
-                    bpy.data.meshes.remove(eval_mesh)
                     _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
 
-                    mapped_count, cube_color_map = _build_cube_maps(
-                        source,
-                        occupied,
-                        ox,
-                        oy,
-                        oz,
-                        cell_len,
-                        world_to_source_matrix=processing_matrix.inverted(),
-                        mat_source_cache=anim_mat_source_cache,
-                        image_cache=anim_image_cache,
-                    )
+                    color_source = bpy.data.objects.new(source_name + "_voxel_color_source", eval_mesh)
+                    try:
+                        mapped_count, cube_color_map = _build_cube_maps(
+                            color_source,
+                            occupied,
+                            ox,
+                            oy,
+                            oz,
+                            cell_len,
+                            world_to_source_matrix=processing_matrix.inverted(),
+                            mat_source_cache=anim_mat_source_cache,
+                            image_cache=anim_image_cache,
+                        )
+                    finally:
+                        bpy.data.objects.remove(color_source, do_unlink=True)
+                        bpy.data.meshes.remove(eval_mesh)
                     frame_color_maps.append(cube_color_map)
                     _log(f"[Voxelator] Frame {frame}: mapped={mapped_count} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
 
@@ -1041,8 +1058,7 @@ class OBJECT_OT_voxelize(Operator):
             _log("[Voxelator] Finished")
             self.report({'INFO'}, f"Voxelator completed animation PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
-        source_eval = source.evaluated_get(depsgraph)
-        target_mesh = bpy.data.meshes.new_from_object(source_eval, preserve_all_data_layers=True, depsgraph=depsgraph)
+        target_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
         processing_matrix = source.matrix_world @ rot_offset_matrix
         target.matrix_world = processing_matrix
@@ -1120,7 +1136,7 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        mapped_count, cube_color_map = _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+        mapped_count, cube_color_map = _build_cube_maps(target, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
         _log(f"[Voxelator] Material mapped: {mapped_count} colorized: {len(cube_color_map)}")
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
