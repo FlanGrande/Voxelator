@@ -45,20 +45,61 @@ def _log(msg):
         except Exception:
             pass
 
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+def _rgba_tuple(color, default=(1.0, 1.0, 1.0, 1.0)):
+    if color is None:
+        return default
+    try:
+        r = _clamp01(color[0])
+        g = _clamp01(color[1])
+        b = _clamp01(color[2])
+        a = _clamp01(color[3]) if len(color) > 3 else 1.0
+        return (r, g, b, a)
+    except Exception:
+        return default
+
+def _valid_image_node(node):
+    return (
+        node
+        and node.type == 'TEX_IMAGE'
+        and node.image
+        and node.image.size[0] > 0
+        and node.image.size[1] > 0
+    )
+
+def _find_base_color_image(socket, seen=None, depth=0):
+    if not socket or not getattr(socket, "is_linked", False) or depth > 8:
+        return None
+    seen = seen or set()
+    for link in socket.links:
+        node = link.from_node
+        if not node or node.name in seen:
+            continue
+        seen.add(node.name)
+        if _valid_image_node(node):
+            return node.image
+        for linked_input in getattr(node, "inputs", []):
+            image = _find_base_color_image(linked_input, seen, depth + 1)
+            if image:
+                return image
+    return None
+
 def _get_color_from_material(mat):
     if not mat:
         return (1.0, 1.0, 1.0, 1.0)
     if not getattr(mat, "use_nodes", False):
         if hasattr(mat, "diffuse_color"):
             c = mat.diffuse_color
-            return (float(c[0]), float(c[1]), float(c[2]), float(c[3] if len(c) > 3 else 1.0))
+            return _rgba_tuple(c)
         return (1.0, 1.0, 1.0, 1.0)
 
     for node in mat.node_tree.nodes:
         if node.type == 'BSDF_PRINCIPLED':
-            return tuple(node.inputs['Base Color'].default_value[:])
+            return _rgba_tuple(node.inputs['Base Color'].default_value[:])
         if node.type == 'BSDF_TOON':
-            return tuple(node.inputs['Color'].default_value[:])
+            return _rgba_tuple(node.inputs['Color'].default_value[:])
     return (1.0, 1.0, 1.0, 1.0)
 
 def _get_material_color_source(mat, mat_source_cache):
@@ -74,17 +115,17 @@ def _get_material_color_source(mat, mat_source_cache):
         for node in mat.node_tree.nodes:
             if node.type == 'BSDF_PRINCIPLED':
                 socket = node.inputs['Base Color']
-                fallback = tuple(socket.default_value[:])
+                fallback = _rgba_tuple(socket.default_value[:])
                 break
             if node.type == 'BSDF_TOON':
                 socket = node.inputs['Color']
-                fallback = tuple(socket.default_value[:])
+                fallback = _rgba_tuple(socket.default_value[:])
                 break
 
         if socket and socket.is_linked:
-            linked_node = socket.links[0].from_node
-            if linked_node.type == 'TEX_IMAGE' and linked_node.image and linked_node.image.size[0] > 0 and linked_node.image.size[1] > 0:
-                source = ("image", linked_node.image, fallback)
+            image = _find_base_color_image(socket)
+            if image:
+                source = ("image", image, fallback)
             else:
                 source = ("solid", fallback)
 
@@ -132,7 +173,56 @@ def _sample_image_bilinear(image, uv, image_cache):
         out[i] = a * (1.0 - ty) + b * ty
     return tuple(out)
 
-def _estimate_face_uv(location_local, poly, uv_data, loops, verts):
+def _barycentric_coords(point, a, b, c):
+    v0 = b - a
+    v1 = c - a
+    v2 = point - a
+    d00 = v0.dot(v0)
+    d01 = v0.dot(v1)
+    d11 = v1.dot(v1)
+    d20 = v2.dot(v0)
+    d21 = v2.dot(v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-12:
+        return None
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    return (u, v, w)
+
+def _uv_from_triangle(location_local, loop_tri, uv_data, verts):
+    loops_idx = loop_tri.loops
+    verts_idx = loop_tri.vertices
+    a = verts[verts_idx[0]].co
+    b = verts[verts_idx[1]].co
+    c = verts[verts_idx[2]].co
+    bary = _barycentric_coords(location_local, a, b, c)
+    if bary is None:
+        return None
+
+    u, v, w = bary
+    uv0 = uv_data[loops_idx[0]].uv
+    uv1 = uv_data[loops_idx[1]].uv
+    uv2 = uv_data[loops_idx[2]].uv
+    uv_x = uv0.x * u + uv1.x * v + uv2.x * w
+    uv_y = uv0.y * u + uv1.y * v + uv2.y * w
+    penalty = max(0.0, -u) + max(0.0, -v) + max(0.0, -w)
+    return (float(uv_x), float(uv_y), penalty)
+
+def _estimate_face_uv(location_local, poly, uv_data, loops, verts, loop_tris_by_poly=None):
+    if loop_tris_by_poly:
+        best = None
+        for loop_tri in loop_tris_by_poly.get(poly.index, ()):
+            uv = _uv_from_triangle(location_local, loop_tri, uv_data, verts)
+            if uv is None:
+                continue
+            if uv[2] <= 1e-5:
+                return (uv[0], uv[1])
+            if best is None or uv[2] < best[2]:
+                best = uv
+        if best is not None:
+            return (best[0], best[1])
+
     sum_u = 0.0
     sum_v = 0.0
     sum_w = 0.0
@@ -477,6 +567,46 @@ def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes)
 
     return verts, faces, face_cells
 
+def _make_voxel_color_material():
+    mat = bpy.data.materials.new("Voxelator_VoxelColor")
+    mat.diffuse_color = (1.0, 1.0, 1.0, 1.0)
+    mat.use_nodes = True
+
+    nodes = mat.node_tree.nodes
+    bsdf = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf:
+        attr = nodes.new(type='ShaderNodeAttribute')
+        attr.attribute_name = "VoxelColor"
+        if 'Color' in attr.outputs and 'Base Color' in bsdf.inputs:
+            mat.node_tree.links.new(attr.outputs['Color'], bsdf.inputs['Base Color'])
+        if 'Alpha' in attr.outputs and 'Alpha' in bsdf.inputs:
+            mat.node_tree.links.new(attr.outputs['Alpha'], bsdf.inputs['Alpha'])
+            mat.blend_method = 'BLEND'
+    return mat
+
+def _apply_voxel_color_attribute(obj, face_cells, cube_color_map):
+    mesh = obj.data
+    color_attr = mesh.color_attributes.new(name="VoxelColor", type='BYTE_COLOR', domain='CORNER')
+    fallback = (1.0, 1.0, 1.0, 1.0)
+
+    polys = mesh.polygons
+    total_p = len(polys)
+    step_p = max(1, total_p // 10) if total_p else 1
+    for pi, poly in enumerate(polys):
+        color = fallback
+        if pi < len(face_cells):
+            color = _rgba_tuple(cube_color_map.get(face_cells[pi]), fallback)
+        for li in poly.loop_indices:
+            color_attr.data[li].color = color
+        poly.material_index = 0
+        if ((pi + 1) % step_p) == 0 or (pi + 1) == total_p:
+            _log(f"[Voxelator] Face color assign {pi+1}/{total_p}")
+
+    mesh.materials.clear()
+    mesh.materials.append(_make_voxel_color_material())
+    mesh.update()
+    return total_p
+
 def _animation_items_for_object(self, context):
     obj = context.object if context else None
     linked_actions = {}
@@ -549,10 +679,15 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     source_polys = source.data.polygons
     source_mats = source.data.materials
     source_mesh = source.data
+    source_mesh.calc_loop_triangles()
     source_loops = source_mesh.loops
     source_verts = source_mesh.vertices
     uv_layer = source_mesh.uv_layers.active
     uv_data = uv_layer.data if uv_layer else None
+    loop_tris_by_poly = {}
+    if uv_data:
+        for loop_tri in source_mesh.loop_triangles:
+            loop_tris_by_poly.setdefault(loop_tri.polygon_index, []).append(loop_tri)
     mat_source_cache = {}
     image_cache = {}
     occ_list = sorted(occupied)
@@ -575,7 +710,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
                     else:
                         uv = None
                         if uv_data and poly.loop_indices:
-                            uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts)
+                            uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts, loop_tris_by_poly)
 
                         if uv is None:
                             cube_color_map[(ix, iy, iz)] = source_info[2]
@@ -979,26 +1114,8 @@ class OBJECT_OT_voxelize(Operator):
         obj.select_set(True)
         context.view_layer.objects.active = obj
 
-        obj.data.materials.clear()
-        for mat_slot in source.material_slots:
-            if mat_slot.material:
-                obj.data.materials.append(mat_slot.material)
-        _log(f"[Voxelator] Materials appended: {sum(1 for s in source.material_slots if s.material)}")
-
-        mat_name_to_idx = {m.name: i for i, m in enumerate(obj.data.materials)}
-        polys = obj.data.polygons
-        total_p = len(polys)
-        step_p = max(1, total_p // 10) if total_p else 1
-        for pi, poly in enumerate(polys):
-            if pi >= len(face_cells):
-                break
-            mat = cube_mat_map.get(face_cells[pi])
-            if mat:
-                idx = mat_name_to_idx.get(mat.name, -1)
-                if idx != -1:
-                    poly.material_index = idx
-            if ((pi + 1) % step_p) == 0 or (pi + 1) == total_p:
-                _log(f"[Voxelator] Face material assign {pi+1}/{total_p}")
+        applied_faces = _apply_voxel_color_attribute(obj, face_cells, cube_color_map)
+        _log(f"[Voxelator] Voxel colors applied: {applied_faces}")
 
         mod = obj.modifiers.new(name='DataTransfer', type='DATA_TRANSFER')
         mod.use_loop_data = True
