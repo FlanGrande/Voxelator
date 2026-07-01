@@ -16,7 +16,7 @@ import os
 import time
 import math
 from collections import deque
-from mathutils import Vector, Matrix
+from mathutils import Vector, Matrix, noise
 from mathutils.bvhtree import BVHTree
 from bpy.props import (
     IntProperty,
@@ -52,6 +52,9 @@ def _clamp01(value):
 def _rgba_tuple(color, default=(1.0, 1.0, 1.0, 1.0)):
     if color is None:
         return default
+    if isinstance(color, (int, float)):
+        v = _clamp01(color)
+        return (v, v, v, 1.0)
     try:
         r = _clamp01(color[0])
         g = _clamp01(color[1])
@@ -70,22 +73,183 @@ def _valid_image_node(node):
         and node.image.size[1] > 0
     )
 
-def _find_base_color_image(socket, seen=None, depth=0):
-    if not socket or not getattr(socket, "is_linked", False) or depth > 8:
-        return None
-    seen = seen or set()
-    for link in socket.links:
-        node = link.from_node
-        if not node or node.name in seen:
-            continue
-        seen.add(node.name)
-        if _valid_image_node(node):
-            return node.image
-        for linked_input in getattr(node, "inputs", []):
-            image = _find_base_color_image(linked_input, seen, depth + 1)
-            if image:
-                return image
+def _linked_node(socket):
+    if socket and getattr(socket, "is_linked", False) and socket.links:
+        return socket.links[0].from_node
     return None
+
+def _socket_default(socket):
+    try:
+        value = socket.default_value
+    except Exception:
+        return 0.0
+    try:
+        if len(value) >= 4:
+            return _rgba_tuple(value)
+        if len(value) == 3:
+            return Vector((float(value[0]), float(value[1]), float(value[2])))
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+def _as_float(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        if len(value) >= 3:
+            return (float(value[0]) + float(value[1]) + float(value[2])) / 3.0
+        if len(value) > 0:
+            return float(value[0])
+    except Exception:
+        pass
+    return 0.0
+
+def _as_vector(value):
+    try:
+        if len(value) >= 3:
+            return Vector((float(value[0]), float(value[1]), float(value[2])))
+        if len(value) == 2:
+            return Vector((float(value[0]), float(value[1]), 0.0))
+    except Exception:
+        pass
+    scalar = _as_float(value)
+    return Vector((scalar, scalar, scalar))
+
+def _mix_rgba(a, b, factor):
+    f = _clamp01(factor)
+    ca = _rgba_tuple(a)
+    cb = _rgba_tuple(b)
+    return tuple(ca[i] * (1.0 - f) + cb[i] * f for i in range(4))
+
+def _color_ramp_sample(ramp, factor):
+    f = _clamp01(factor)
+    elements = sorted(ramp.elements, key=lambda e: e.position)
+    if not elements:
+        return (1.0, 1.0, 1.0, 1.0)
+    if f <= elements[0].position:
+        return _rgba_tuple(elements[0].color)
+    if f >= elements[-1].position:
+        return _rgba_tuple(elements[-1].color)
+
+    for i in range(len(elements) - 1):
+        left = elements[i]
+        right = elements[i + 1]
+        if left.position <= f <= right.position:
+            span = max(1e-8, right.position - left.position)
+            t = (f - left.position) / span
+            if ramp.interpolation == 'CONSTANT':
+                t = 0.0
+            elif ramp.interpolation == 'EASE':
+                t = t * t * (3.0 - 2.0 * t)
+            return _mix_rgba(left.color, right.color, t)
+    return _rgba_tuple(elements[-1].color)
+
+def _noise_factor(coord, scale, detail, roughness, lacunarity, distortion):
+    p = Vector(coord) * max(0.0001, float(scale))
+    if distortion:
+        d = float(distortion)
+        p += Vector((
+            noise.noise(p + Vector((12.9898, 78.233, 37.719))),
+            noise.noise(p + Vector((39.346, 11.135, 83.155))),
+            noise.noise(p + Vector((73.156, 52.235, 9.151))),
+        )) * d
+
+    detail = max(0.0, float(detail))
+    roughness = max(0.0, float(roughness))
+    lacunarity = max(0.0001, float(lacunarity))
+    octaves = max(1, int(math.floor(detail)))
+    fractional = detail - math.floor(detail)
+    amp = 1.0
+    freq = 1.0
+    total = 0.0
+    norm = 0.0
+
+    for _ in range(octaves):
+        total += amp * ((noise.noise(p * freq) + 1.0) * 0.5)
+        norm += amp
+        amp *= roughness
+        freq *= lacunarity
+    if fractional > 1e-6:
+        total += amp * fractional * ((noise.noise(p * freq) + 1.0) * 0.5)
+        norm += amp * fractional
+    return _clamp01(total / max(norm, 1e-8))
+
+def _eval_node_socket(socket, sample_ctx, image_cache, seen=None, depth=0):
+    if depth > 12:
+        return _socket_default(socket)
+    node = _linked_node(socket)
+    if not node:
+        return _socket_default(socket)
+    seen = seen or set()
+    key = (node.name, socket.links[0].from_socket.name if socket.links else "")
+    if key in seen:
+        return _socket_default(socket)
+    seen.add(key)
+    out_name = socket.links[0].from_socket.name if socket.links else ""
+
+    if node.type == 'TEX_IMAGE':
+        uv = sample_ctx.get("uv")
+        sampled = _sample_image_bilinear(node.image, uv, image_cache) if _valid_image_node(node) and uv is not None else None
+        if out_name == 'Alpha':
+            return sampled[3] if sampled else 1.0
+        return sampled if sampled else (1.0, 1.0, 1.0, 1.0)
+
+    if node.type == 'VALTORGB':
+        fac = _as_float(_eval_node_socket(node.inputs['Fac'], sample_ctx, image_cache, seen, depth + 1))
+        color = _color_ramp_sample(node.color_ramp, fac)
+        return color[3] if out_name == 'Alpha' else color
+
+    if node.type == 'TEX_NOISE':
+        vector = sample_ctx.get("generated", sample_ctx.get("local", Vector((0.0, 0.0, 0.0))))
+        if 'Vector' in node.inputs and node.inputs['Vector'].is_linked:
+            vector = _as_vector(_eval_node_socket(node.inputs['Vector'], sample_ctx, image_cache, seen, depth + 1))
+        scale = _as_float(_eval_node_socket(node.inputs['Scale'], sample_ctx, image_cache, seen, depth + 1)) if 'Scale' in node.inputs else 5.0
+        detail = _as_float(_eval_node_socket(node.inputs['Detail'], sample_ctx, image_cache, seen, depth + 1)) if 'Detail' in node.inputs else 2.0
+        roughness = _as_float(_eval_node_socket(node.inputs['Roughness'], sample_ctx, image_cache, seen, depth + 1)) if 'Roughness' in node.inputs else 0.5
+        lacunarity = _as_float(_eval_node_socket(node.inputs['Lacunarity'], sample_ctx, image_cache, seen, depth + 1)) if 'Lacunarity' in node.inputs else 2.0
+        distortion = _as_float(_eval_node_socket(node.inputs['Distortion'], sample_ctx, image_cache, seen, depth + 1)) if 'Distortion' in node.inputs else 0.0
+        fac = _noise_factor(vector, scale, detail, roughness, lacunarity, distortion)
+        if out_name == 'Color':
+            return (fac, fac, fac, 1.0)
+        return fac
+
+    if node.type == 'TEX_COORD':
+        if out_name == 'UV' and sample_ctx.get("uv") is not None:
+            u, v = sample_ctx["uv"]
+            return Vector((u, v, 0.0))
+        if out_name == 'Object':
+            return sample_ctx.get("local", Vector((0.0, 0.0, 0.0)))
+        return sample_ctx.get("generated", sample_ctx.get("local", Vector((0.0, 0.0, 0.0))))
+
+    if node.type == 'MIX':
+        factor = _as_float(_eval_node_socket(node.inputs['Factor'], sample_ctx, image_cache, seen, depth + 1)) if 'Factor' in node.inputs else 0.5
+        a_name = 'A' if 'A' in node.inputs else 'Color1'
+        b_name = 'B' if 'B' in node.inputs else 'Color2'
+        if a_name in node.inputs and b_name in node.inputs:
+            a = _eval_node_socket(node.inputs[a_name], sample_ctx, image_cache, seen, depth + 1)
+            b = _eval_node_socket(node.inputs[b_name], sample_ctx, image_cache, seen, depth + 1)
+            return _mix_rgba(a, b, factor)
+
+    if node.type == 'MIX_RGB':
+        factor = _as_float(_eval_node_socket(node.inputs['Fac'], sample_ctx, image_cache, seen, depth + 1))
+        a = _eval_node_socket(node.inputs['Color1'], sample_ctx, image_cache, seen, depth + 1)
+        b = _eval_node_socket(node.inputs['Color2'], sample_ctx, image_cache, seen, depth + 1)
+        return _mix_rgba(a, b, factor)
+
+    if node.type == 'RGB':
+        return _rgba_tuple(node.outputs['Color'].default_value[:]) if 'Color' in node.outputs else (1.0, 1.0, 1.0, 1.0)
+    if node.type == 'VALUE':
+        return float(node.outputs['Value'].default_value) if 'Value' in node.outputs else 0.0
+
+    if out_name in node.outputs and hasattr(node.outputs[out_name], "default_value"):
+        return _socket_default(node.outputs[out_name])
+    for input_socket in getattr(node, "inputs", []):
+        if input_socket.is_linked:
+            return _eval_node_socket(input_socket, sample_ctx, image_cache, seen, depth + 1)
+    return _socket_default(socket)
 
 def _get_color_from_material(mat):
     if not mat:
@@ -124,11 +288,11 @@ def _get_material_color_source(mat, mat_source_cache):
                 break
 
         if socket and socket.is_linked:
-            image = _find_base_color_image(socket)
-            if image:
-                source = ("image", image, fallback)
+            linked_node = _linked_node(socket)
+            if _valid_image_node(linked_node):
+                source = ("image", linked_node.image, fallback)
             else:
-                source = ("solid", fallback)
+                source = ("node", socket, fallback)
 
     mat_source_cache[mat.name] = source
     return source
@@ -681,6 +845,22 @@ def _mesh_from_source(source, depsgraph, apply_modifiers):
         return source.data.copy()
     return bpy.data.meshes.new_from_object(source, preserve_all_data_layers=True, depsgraph=depsgraph)
 
+def _mesh_bounds(verts):
+    if not verts:
+        zero = Vector((0.0, 0.0, 0.0))
+        return zero, zero
+    min_v = Vector((min(v.co.x for v in verts), min(v.co.y for v in verts), min(v.co.z for v in verts)))
+    max_v = Vector((max(v.co.x for v in verts), max(v.co.y for v in verts), max(v.co.z for v in verts)))
+    return min_v, max_v
+
+def _generated_coord(location, min_v, max_v):
+    span = max_v - min_v
+    return Vector((
+        (location.x - min_v.x) / span.x if abs(span.x) > 1e-8 else 0.0,
+        (location.y - min_v.y) / span.y if abs(span.y) > 1e-8 else 0.0,
+        (location.z - min_v.z) / span.z if abs(span.z) > 1e-8 else 0.0,
+    ))
+
 def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None):
     mapped_count = 0
     cube_color_map = {}
@@ -691,6 +871,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     source_mesh.calc_loop_triangles()
     source_loops = source_mesh.loops
     source_verts = source_mesh.vertices
+    min_v, max_v = _mesh_bounds(source_verts)
     loop_tris = list(source_mesh.loop_triangles)
     uv_layer = source_mesh.uv_layers.active
     uv_data = uv_layer.data if uv_layer else None
@@ -751,11 +932,17 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
                             elif poly.loop_indices:
                                 uv = _estimate_face_uv(location, poly, uv_data, source_loops, source_verts, loop_tris_by_poly)
 
-                        if uv is None:
-                            cube_color_map[(ix, iy, iz)] = source_info[2]
-                        else:
-                            sampled = _sample_image_bilinear(source_info[1], uv, image_cache)
+                        if source_info[0] == "image":
+                            sampled = _sample_image_bilinear(source_info[1], uv, image_cache) if uv is not None else None
                             cube_color_map[(ix, iy, iz)] = sampled if sampled is not None else source_info[2]
+                        elif source_info[0] == "node":
+                            sample_ctx = {
+                                "local": location,
+                                "generated": _generated_coord(location, min_v, max_v),
+                                "uv": uv,
+                            }
+                            color = _eval_node_socket(source_info[1], sample_ctx, image_cache)
+                            cube_color_map[(ix, iy, iz)] = _rgba_tuple(color, source_info[2])
         if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
             _log(f"[Voxelator] Material map {i+1}/{n_occ}")
 
