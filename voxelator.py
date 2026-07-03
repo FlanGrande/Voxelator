@@ -16,6 +16,11 @@ import os
 import time
 import math
 from collections import deque
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 from mathutils import Vector, Matrix, noise
 from mathutils.bvhtree import BVHTree
 from bpy.props import (
@@ -33,6 +38,7 @@ from bpy.types import (
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voxelator.log")
 LOG_TO_STDOUT = False
+_BAKE_CACHE = {}
 
 def _log(msg):
     try:
@@ -297,19 +303,35 @@ def _get_material_color_source(mat, mat_source_cache):
     mat_source_cache[mat.name] = source
     return source
 
+def _image_pixels_flat(image):
+    """Fast flat pixel buffer for an image, or None if empty."""
+    w = int(image.size[0])
+    h = int(image.size[1])
+    if w <= 0 or h <= 0:
+        return None
+    count = w * h * 4
+    if np is not None:
+        pixels = np.empty(count, dtype=np.float32)
+        image.pixels.foreach_get(pixels)
+    else:
+        pixels = [0.0] * count
+        image.pixels.foreach_get(pixels)
+        pixels = tuple(pixels)
+    return (w, h, pixels)
+
 def _sample_image_bilinear(image, uv, image_cache):
     img_key = image.name
     cached = image_cache.get(img_key)
     if cached is None:
-        w = int(image.size[0])
-        h = int(image.size[1])
-        if w <= 0 or h <= 0:
+        cached = _image_pixels_flat(image)
+        if cached is None:
             return None
-        pixels = tuple(image.pixels[:])
-        cached = (w, h, pixels)
         image_cache[img_key] = cached
 
     w, h, pixels = cached
+    return _sample_pixels_bilinear(w, h, pixels, uv)
+
+def _sample_pixels_bilinear(w, h, pixels, uv):
     u = uv[0] % 1.0
     v = uv[1] % 1.0
 
@@ -324,7 +346,7 @@ def _sample_image_bilinear(image, uv, image_cache):
 
     def px(ix, iy):
         idx = (iy * w + ix) * 4
-        return (pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3])
+        return (float(pixels[idx]), float(pixels[idx + 1]), float(pixels[idx + 2]), float(pixels[idx + 3]))
 
     c00 = px(x0, y0)
     c10 = px(x1, y0)
@@ -452,7 +474,7 @@ def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_color_map, tile_size):
     px = [0.0] * (width * height * 4)
     _log(f"[Voxelator] Spritesheet dimensions: {width} x {height}")
     _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile)
-    img.pixels = px
+    img.pixels.foreach_set(px)
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
@@ -478,7 +500,7 @@ def _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, filepath, ti
         _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile, row_count=frame_count, row_index=i, align_left=False)
         _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
 
-    img.pixels = px
+    img.pixels.foreach_set(px)
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
@@ -582,6 +604,155 @@ def _tri_box_overlap(center, half_size, tri):
 
     return True
 
+def _world_verts_np(mesh, matrix_world):
+    """All mesh vertices transformed by matrix_world as an (N, 3) float64 array."""
+    count = len(mesh.vertices)
+    buf = np.empty(count * 3, dtype=np.float64)
+    mesh.vertices.foreach_get("co", buf)
+    co = buf.reshape(count, 3)
+    m = np.array(matrix_world, dtype=np.float64)
+    return co @ m[:3, :3].T + m[:3, 3]
+
+def _world_bounds(mesh, matrix_world):
+    """(min_xyz, max_xyz) tuples of mesh vertices under matrix_world, or None if empty."""
+    if not len(mesh.vertices):
+        return None
+    if np is not None:
+        pts = _world_verts_np(mesh, matrix_world)
+        mn = pts.min(axis=0)
+        mx = pts.max(axis=0)
+        return (float(mn[0]), float(mn[1]), float(mn[2])), (float(mx[0]), float(mx[1]), float(mx[2]))
+    verts_world = [matrix_world @ v.co for v in mesh.vertices]
+    return (
+        (min(v.x for v in verts_world), min(v.y for v in verts_world), min(v.z for v in verts_world)),
+        (max(v.x for v in verts_world), max(v.y for v in verts_world), max(v.z for v in verts_world)),
+    )
+
+def _flood_fill_outside_np(occ):
+    """Numpy flood fill from grid boundary through empty cells. Returns outside bool array."""
+    outside = np.zeros_like(occ)
+    empty = ~occ
+    outside[0, :, :] = empty[0, :, :]
+    outside[-1, :, :] |= empty[-1, :, :]
+    outside[:, 0, :] |= empty[:, 0, :]
+    outside[:, -1, :] |= empty[:, -1, :]
+    outside[:, :, 0] |= empty[:, :, 0]
+    outside[:, :, -1] |= empty[:, :, -1]
+
+    frontier = outside.copy()
+    while frontier.any():
+        grown = np.zeros_like(occ)
+        grown[1:, :, :] |= frontier[:-1, :, :]
+        grown[:-1, :, :] |= frontier[1:, :, :]
+        grown[:, 1:, :] |= frontier[:, :-1, :]
+        grown[:, :-1, :] |= frontier[:, 1:, :]
+        grown[:, :, 1:] |= frontier[:, :, :-1]
+        grown[:, :, :-1] |= frontier[:, :, 1:]
+        grown &= empty
+        grown &= ~outside
+        outside |= grown
+        frontier = grown
+    return outside
+
+def _build_occupied_cells_np(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
+    """Vectorized triangle-box occupancy. Returns set of (ix, iy, iz)."""
+    verts_w = _world_verts_np(mesh, matrix_world)
+
+    tri_count = len(mesh.loop_triangles)
+    tri_idx = np.empty(tri_count * 3, dtype=np.int64)
+    mesh.loop_triangles.foreach_get("vertices", tri_idx)
+    tri_idx = tri_idx.reshape(tri_count, 3)
+
+    half = 0.5 * cell_len
+    occ = np.zeros((dx, dy, dz), dtype=bool)
+    grid_min = np.array((grid_min_x, grid_min_y, grid_min_z), dtype=np.float64)
+    step = max(1, tri_count // 10) if tri_count else 1
+
+    tri_a = verts_w[tri_idx[:, 0]]
+    tri_b = verts_w[tri_idx[:, 1]]
+    tri_c = verts_w[tri_idx[:, 2]]
+    tri_min = np.minimum(np.minimum(tri_a, tri_b), tri_c)
+    tri_max = np.maximum(np.maximum(tri_a, tri_b), tri_c)
+    lo = np.maximum(0, np.floor((tri_min - grid_min) / cell_len).astype(np.int64) - 1)
+    hi = np.minimum(
+        np.array((dx - 1, dy - 1, dz - 1), dtype=np.int64),
+        np.floor((tri_max - grid_min) / cell_len).astype(np.int64) + 1,
+    )
+
+    for ti in range(tri_count):
+        ix0, iy0, iz0 = lo[ti]
+        ix1, iy1, iz1 = hi[ti]
+        if ix1 < ix0 or iy1 < iy0 or iz1 < iz0:
+            continue
+
+        a = tri_a[ti]
+        b = tri_b[ti]
+        c = tri_c[ti]
+
+        gx = grid_min_x + (np.arange(ix0, ix1 + 1, dtype=np.float64) + 0.5) * cell_len
+        gy = grid_min_y + (np.arange(iy0, iy1 + 1, dtype=np.float64) + 0.5) * cell_len
+        gz = grid_min_z + (np.arange(iz0, iz1 + 1, dtype=np.float64) + 0.5) * cell_len
+        centers = np.stack(np.meshgrid(gx, gy, gz, indexing="ij"), axis=-1).reshape(-1, 3)
+
+        v0 = a - centers
+        v1 = b - centers
+        v2 = c - centers
+
+        e0 = b - a
+        e1 = c - b
+        e2 = a - c
+
+        keep = np.ones(len(centers), dtype=bool)
+
+        for ex, ey, ez in (e0, e1, e2):
+            for axis in ((0.0, -ez, ey), (ez, 0.0, -ex), (-ey, ex, 0.0)):
+                ax, ay, az = axis
+                rad = half * (abs(ax) + abs(ay) + abs(az))
+                p0 = v0[:, 0] * ax + v0[:, 1] * ay + v0[:, 2] * az
+                p1 = v1[:, 0] * ax + v1[:, 1] * ay + v1[:, 2] * az
+                p2 = v2[:, 0] * ax + v2[:, 1] * ay + v2[:, 2] * az
+                min_p = np.minimum(np.minimum(p0, p1), p2)
+                max_p = np.maximum(np.maximum(p0, p1), p2)
+                keep &= (min_p <= rad) & (max_p >= -rad)
+                if not keep.any():
+                    break
+            else:
+                continue
+            break
+
+        if keep.any():
+            for axis_i in range(3):
+                mn = np.minimum(np.minimum(v0[:, axis_i], v1[:, axis_i]), v2[:, axis_i])
+                mx = np.maximum(np.maximum(v0[:, axis_i], v1[:, axis_i]), v2[:, axis_i])
+                keep &= (mn <= half) & (mx >= -half)
+
+        if keep.any():
+            normal = np.cross(e0, e1)
+            rad = half * (abs(normal[0]) + abs(normal[1]) + abs(normal[2]))
+            dist = v0[:, 0] * normal[0] + v0[:, 1] * normal[1] + v0[:, 2] * normal[2]
+            keep &= np.abs(dist) <= rad
+
+        if keep.any():
+            hit = np.nonzero(keep)[0]
+            ny = iy1 - iy0 + 1
+            nz = iz1 - iz0 + 1
+            hix = ix0 + hit // (ny * nz)
+            hiy = iy0 + (hit // nz) % ny
+            hiz = iz0 + hit % nz
+            occ[hix, hiy, hiz] = True
+
+        if ((ti + 1) % step) == 0 or (ti + 1) == tri_count:
+            _log(f"[Voxelator] Surface voxelize {ti+1}/{tri_count}")
+
+    shell_count = int(occ.sum())
+    if fill_volume:
+        outside = _flood_fill_outside_np(occ)
+        occ |= ~outside
+        _log(f"[Voxelator] Volume fill: shell={shell_count} outside={int(outside.sum())} total={int(occ.sum())}")
+
+    xs, ys, zs = np.nonzero(occ)
+    return {(int(x), int(y), int(z)) for x, y, z in zip(xs, ys, zs)}
+
 def _flood_fill_outside(dx, dy, dz, shell):
     outside = set()
     q = deque()
@@ -623,6 +794,14 @@ def _flood_fill_outside(dx, dy, dz, shell):
 
 def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
     mesh.calc_loop_triangles()
+    if np is not None:
+        try:
+            return _build_occupied_cells_np(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume)
+        except Exception as exc:
+            _log(f"[Voxelator] Numpy voxelize failed, falling back to Python: {exc}")
+    return _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume)
+
+def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
     verts_w = [matrix_world @ v.co for v in mesh.vertices]
 
     half = 0.5 * cell_len
@@ -756,16 +935,29 @@ def _apply_voxel_color_attribute(obj, face_cells, cube_color_map):
 
     polys = mesh.polygons
     total_p = len(polys)
-    step_p = max(1, total_p // 10) if total_p else 1
-    for pi, poly in enumerate(polys):
-        color = fallback
-        if pi < len(face_cells):
+    total_loops = len(mesh.loops)
+
+    loop_starts = [0] * total_p
+    loop_totals = [0] * total_p
+    polys.foreach_get("loop_start", loop_starts)
+    polys.foreach_get("loop_total", loop_totals)
+
+    flat = [1.0] * (total_loops * 4)
+    face_cell_count = len(face_cells)
+    for pi in range(total_p):
+        if pi < face_cell_count:
             color = _rgba_tuple(cube_color_map.get(face_cells[pi]), fallback)
-        for li in poly.loop_indices:
-            color_attr.data[li].color = color
-        poly.material_index = 0
-        if ((pi + 1) % step_p) == 0 or (pi + 1) == total_p:
-            _log(f"[Voxelator] Face color assign {pi+1}/{total_p}")
+        else:
+            color = fallback
+        start = loop_starts[pi]
+        for li in range(start, start + loop_totals[pi]):
+            base = li * 4
+            flat[base] = color[0]
+            flat[base + 1] = color[1]
+            flat[base + 2] = color[2]
+            flat[base + 3] = color[3]
+
+    color_attr.data.foreach_set("color", flat)
 
     mesh.materials.clear()
     mesh.materials.append(_make_voxel_color_material())
@@ -877,8 +1069,9 @@ def _uv_from_loop_tri_flat(location_local, loop_tri, uv_flat, verts):
 
 def _bake_base_color_image(context, obj, resolution):
     """Bake the exact evaluated Base Color (Cycles diffuse color pass) of all
-    materials on obj into one image, using a dedicated non-overlapping UV layer.
-    Returns (image, uv_flat) or (None, None) on failure."""
+    materials on obj, using a dedicated non-overlapping UV layer.
+    Returns ((w, h, pixels), uv_flat) or (None, None) on failure.
+    The temporary bake image is always removed before returning."""
     mesh = obj.data
     if not any(mesh.materials):
         _log("[Voxelator] Bake skipped: no materials")
@@ -939,19 +1132,20 @@ def _bake_base_color_image(context, obj, resolution):
 
         uv_flat = [0.0] * (len(mesh.loops) * 2)
         mesh.uv_layers["VoxelBake"].data.foreach_get("uv", uv_flat)
-        return image, uv_flat
+        pixels_flat = _image_pixels_flat(image)
+        return pixels_flat, uv_flat
     except Exception as exc:
         _log(f"[Voxelator] Bake failed, falling back to node sampling: {exc}")
-        if image is not None:
-            try:
-                bpy.data.images.remove(image)
-            except Exception:
-                pass
         return None, None
     finally:
         for node_tree, tex in temp_nodes:
             try:
                 node_tree.nodes.remove(tex)
+            except Exception:
+                pass
+        if image is not None:
+            try:
+                bpy.data.images.remove(image)
             except Exception:
                 pass
         for mat in restore_use_nodes:
@@ -994,15 +1188,19 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     loop_tris = list(source_mesh.loop_triangles)
     uv_layer = source_mesh.uv_layers.active
     uv_data = uv_layer.data if uv_layer else None
-    bake_image = None
+    bake_pixels = None
     bake_uv_flat = None
     if bake_data:
-        bake_image, bake_uv_flat = bake_data
+        bake_pixels, bake_uv_flat = bake_data
     use_bake = bool(
-        bake_image is not None
+        bake_pixels is not None
         and bake_uv_flat
         and len(bake_uv_flat) == len(source_loops) * 2
     )
+    bake_w = bake_h = 0
+    bake_px = None
+    if use_bake:
+        bake_w, bake_h, bake_px = bake_pixels
     if bake_data and not use_bake:
         _log("[Voxelator] Bake data mismatch with mesh loops; using fallback sampling")
     loop_tris_by_poly = {}
@@ -1014,12 +1212,20 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     bvh = None
     if loop_tris:
         try:
-            verts_local = [v.co.copy() for v in source_verts]
-            tri_indices = [tuple(loop_tri.vertices) for loop_tri in loop_tris]
+            if np is not None:
+                vert_buf = np.empty(len(source_verts) * 3, dtype=np.float64)
+                source_verts.foreach_get("co", vert_buf)
+                verts_local = vert_buf.reshape(-1, 3).tolist()
+                tri_buf = np.empty(len(loop_tris) * 3, dtype=np.int64)
+                source_mesh.loop_triangles.foreach_get("vertices", tri_buf)
+                tri_indices = tri_buf.reshape(-1, 3).tolist()
+            else:
+                verts_local = [v.co.copy() for v in source_verts]
+                tri_indices = [tuple(loop_tri.vertices) for loop_tri in loop_tris]
             bvh = BVHTree.FromPolygons(verts_local, tri_indices, all_triangles=True)
         except Exception as exc:
             _log(f"[Voxelator] BVH material lookup fallback: {exc}")
-    occ_list = sorted(occupied)
+    occ_list = list(occupied)
     n_occ = len(occ_list)
     step_occ = max(1, n_occ // 10) if n_occ else 1
 
@@ -1056,7 +1262,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
                         if bake_uv is not None:
                             break
                 if bake_uv is not None:
-                    color = _sample_image_bilinear(bake_image, bake_uv, image_cache)
+                    color = _sample_pixels_bilinear(bake_w, bake_h, bake_px, bake_uv)
 
             if color is None and poly.material_index < len(source_mats):
                 mat = source_mats[poly.material_index]
@@ -1136,6 +1342,11 @@ class OBJECT_OT_voxelize(Operator):
         default=1024,
         min=64,
         max=8192,
+    )
+    reuse_bake: bpy.props.BoolProperty(
+        name="Reuse Bake",
+        description="Reuse the cached base color bake from a previous run in this session (used by the CLI when exporting multiple actions)",
+        default=False,
     )
     rotation_offset_deg: bpy.props.FloatProperty(
         name="Rotation Offset Z",
@@ -1296,17 +1507,18 @@ class OBJECT_OT_voxelize(Operator):
                     scene.frame_set(frame)
                     eval_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
                     processing_matrix = source.matrix_world @ rot_offset_matrix
-                    verts_world = [processing_matrix @ v.co for v in eval_mesh.vertices]
+                    bounds = _world_bounds(eval_mesh, processing_matrix)
                     bpy.data.meshes.remove(eval_mesh)
-                    if not verts_world:
+                    if bounds is None:
                         continue
 
-                    min_x = min(min_x, min(v.x for v in verts_world))
-                    min_y = min(min_y, min(v.y for v in verts_world))
-                    min_z = min(min_z, min(v.z for v in verts_world))
-                    max_x = max(max_x, max(v.x for v in verts_world))
-                    max_y = max(max_y, max(v.y for v in verts_world))
-                    max_z = max(max_z, max(v.z for v in verts_world))
+                    (bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z) = bounds
+                    min_x = min(min_x, bmin_x)
+                    min_y = min(min_y, bmin_y)
+                    min_z = min(min_z, bmin_z)
+                    max_x = max(max_x, bmax_x)
+                    max_y = max(max_y, bmax_y)
+                    max_z = max(max_z, bmax_z)
                     _log(f"[Voxelator] Animation bounds {i+1}/{len(frames)} frame={frame}")
 
                 if min_x == float('inf'):
@@ -1359,18 +1571,27 @@ class OBJECT_OT_voxelize(Operator):
                 _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
                 _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
-                bake_image = None
+                bake_pixels = None
                 bake_uv_flat = None
                 if self.bake_colors:
-                    scene.frame_set(frames[0])
-                    bake_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
-                    bake_obj = bpy.data.objects.new(source_name + "_voxel_bake", bake_mesh)
-                    context.collection.objects.link(bake_obj)
-                    try:
-                        bake_image, bake_uv_flat = _bake_base_color_image(context, bake_obj, self.bake_resolution)
-                    finally:
-                        bpy.data.objects.remove(bake_obj, do_unlink=True)
-                        bpy.data.meshes.remove(bake_mesh)
+                    bake_key = (source_name, bool(self.apply_modifiers), int(self.bake_resolution))
+                    cached_bake = _BAKE_CACHE.get("entry")
+                    if self.reuse_bake and cached_bake and cached_bake["key"] == bake_key:
+                        bake_pixels = cached_bake["pixels"]
+                        bake_uv_flat = cached_bake["uv_flat"]
+                        _log("[Voxelator] Reusing cached base color bake")
+                    else:
+                        scene.frame_set(frames[0])
+                        bake_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
+                        bake_obj = bpy.data.objects.new(source_name + "_voxel_bake", bake_mesh)
+                        context.collection.objects.link(bake_obj)
+                        try:
+                            bake_pixels, bake_uv_flat = _bake_base_color_image(context, bake_obj, self.bake_resolution)
+                        finally:
+                            bpy.data.objects.remove(bake_obj, do_unlink=True)
+                            bpy.data.meshes.remove(bake_mesh)
+                        if bake_pixels is not None:
+                            _BAKE_CACHE["entry"] = {"key": bake_key, "pixels": bake_pixels, "uv_flat": bake_uv_flat}
 
                 frame_color_maps = []
                 anim_mat_source_cache = {}
@@ -1395,7 +1616,7 @@ class OBJECT_OT_voxelize(Operator):
                             world_to_source_matrix=processing_matrix.inverted(),
                             mat_source_cache=anim_mat_source_cache,
                             image_cache=anim_image_cache,
-                            bake_data=(bake_image, bake_uv_flat) if bake_image is not None else None,
+                            bake_data=(bake_pixels, bake_uv_flat) if bake_pixels is not None else None,
                         )
                     finally:
                         bpy.data.objects.remove(color_source, do_unlink=True)
@@ -1403,11 +1624,6 @@ class OBJECT_OT_voxelize(Operator):
                     frame_color_maps.append(cube_color_map)
                     _log(f"[Voxelator] Frame {frame}: mapped={mapped_count} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
 
-                if bake_image is not None:
-                    try:
-                        bpy.data.images.remove(bake_image)
-                    except Exception:
-                        pass
                 _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
 
                 _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
@@ -1436,18 +1652,13 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Built eval mesh object: {target.name}")
         _log(f"[Voxelator] Target dims: {target.dimensions[:]}")
 
-        verts_world = [target.matrix_world @ v.co for v in target.data.vertices]
-        if not verts_world:
+        bounds = _world_bounds(target.data, target.matrix_world)
+        if bounds is None:
             bpy.data.objects.remove(target, do_unlink=True)
             _log("[Voxelator] Aborted: target has no vertices")
             self.report({'ERROR'}, "Voxelator: target has no vertices")
             return {'CANCELLED'}
-        min_x = min(v.x for v in verts_world)
-        min_y = min(v.y for v in verts_world)
-        min_z = min(v.z for v in verts_world)
-        max_x = max(v.x for v in verts_world)
-        max_y = max(v.y for v in verts_world)
-        max_z = max(v.z for v in verts_world)
+        (min_x, min_y, min_z), (max_x, max_y, max_z) = bounds
 
         span_x = max_x - min_x
         span_y = max_y - min_y
@@ -1504,10 +1715,10 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        bake_image = None
+        bake_pixels = None
         bake_uv_flat = None
         if self.bake_colors:
-            bake_image, bake_uv_flat = _bake_base_color_image(context, target, self.bake_resolution)
+            bake_pixels, bake_uv_flat = _bake_base_color_image(context, target, self.bake_resolution)
 
         mapped_count, cube_color_map = _build_cube_maps(
             target,
@@ -1517,13 +1728,8 @@ class OBJECT_OT_voxelize(Operator):
             oz,
             cell_len,
             world_to_source_matrix=processing_matrix.inverted(),
-            bake_data=(bake_image, bake_uv_flat) if bake_image is not None else None,
+            bake_data=(bake_pixels, bake_uv_flat) if bake_pixels is not None else None,
         )
-        if bake_image is not None:
-            try:
-                bpy.data.images.remove(bake_image)
-            except Exception:
-                pass
         _log(f"[Voxelator] Material mapped: {mapped_count} colorized: {len(cube_color_map)}")
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()

@@ -202,6 +202,7 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--export-animation` | `0` | `1` exports animations. |
 | `--action` | `All` | Action name, or `All`. |
 | `--frame-step` | `1` | Sample every Nth animation frame. |
+| `--jobs` | `1` | Parallel Blender processes. |
 | `--skip-existing` | off | Skip FBX files with existing output PNGs. |
 | `--max-files` | `0` | Optional cap. `0` means no cap. |
 | `--dry-run` | off | List discovered FBX files and exit. |

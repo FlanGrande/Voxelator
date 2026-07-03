@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -213,6 +214,7 @@ def main() -> int:
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animations (default: 0)")
     parser.add_argument("--action", default="All", help="Action name or All (default: All)")
     parser.add_argument("--frame-step", type=int, default=1, help="Animation frame step (default: 1)")
+    parser.add_argument("--jobs", type=int, default=1, help="Parallel Blender processes (default: 1)")
     parser.add_argument("--skip-existing", action="store_true", help="Skip files with existing output pattern")
     parser.add_argument("--max-files", type=int, default=0, help="Optional cap for number of FBX files")
     parser.add_argument("--dry-run", action="store_true", help="Only list discovered files and exit")
@@ -273,8 +275,9 @@ def main() -> int:
     skipped = 0
     failures = []
     cleaned_files = cleaned_output_files + cleaned_log_files
+    total = len(fbx_files)
 
-    for idx, fbx in enumerate(fbx_files, start=1):
+    def process_one(idx: int, fbx: Path) -> dict:
         rel = fbx.relative_to(input_dir)
         out_base = _output_base_for_fbx(fbx)
         rel_parent = _relative_parent_for_output(fbx, input_dir, project_dir)
@@ -286,11 +289,9 @@ def main() -> int:
         existing_outputs = _generated_output_paths(output_dir, out_base)
 
         if args.skip_existing and existing_outputs:
-            skipped += 1
-            print(f"[{idx}/{len(fbx_files)}] SKIP {rel} existing={len(existing_outputs)}", flush=True)
-            continue
+            print(f"[{idx}/{total}] SKIP {rel} existing={len(existing_outputs)}", flush=True)
+            return {"status": "skipped"}
 
-        processed += 1
         out_path = output_dir / f"{out_base}.png"
         run_log = log_dir / f"{out_base}.batch.log"
         voxel_log = log_dir / f"{out_base}.log"
@@ -328,7 +329,7 @@ def main() -> int:
             str(voxel_log),
         ]
 
-        print(f"[{idx}/{len(fbx_files)}] START {rel}", flush=True)
+        print(f"[{idx}/{total}] START {rel}", flush=True)
         t0 = time.perf_counter()
         with open(run_log, "w", encoding="utf-8") as lf:
             proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
@@ -341,36 +342,55 @@ def main() -> int:
             exported = max(exported, runner_result["exported"])
 
         if proc.returncode == 0 and exported > 0 and (not runner_result["found"] or runner_result["success"]):
-            succeeded += 1
-            print(f"[{idx}/{len(fbx_files)}] OK {rel} files={exported} in {dt:.1f}s", flush=True)
-        else:
-            failed += 1
-            primary = _extract_failure_reason(run_log)
-            secondary = ""
-            classification = "unknown"
-            if proc.returncode != 0:
-                classification = "process_error"
-            elif runner_result["found"] and not runner_result["success"]:
-                classification = "runner_reported_failure"
-                if runner_result["error"]:
-                    secondary = f"runner_error:{runner_result['error']}"
-            elif exported == 0:
-                classification = "no_outputs"
-                secondary = "no output files produced"
-            elif "warning_only:" in primary:
-                classification = "warning_only"
+            print(f"[{idx}/{total}] OK {rel} files={exported} in {dt:.1f}s", flush=True)
+            return {"status": "succeeded"}
 
-            failures.append(
-                {
-                    "fbx": str(fbx),
-                    "return_code": proc.returncode,
-                    "log": str(run_log),
-                    "classification": classification,
-                    "primary_reason": primary,
-                    "secondary_reason": secondary,
-                }
-            )
-            print(f"[{idx}/{len(fbx_files)}] FAIL {rel} rc={proc.returncode} in {dt:.1f}s", flush=True)
+        primary = _extract_failure_reason(run_log)
+        secondary = ""
+        classification = "unknown"
+        if proc.returncode != 0:
+            classification = "process_error"
+        elif runner_result["found"] and not runner_result["success"]:
+            classification = "runner_reported_failure"
+            if runner_result["error"]:
+                secondary = f"runner_error:{runner_result['error']}"
+        elif exported == 0:
+            classification = "no_outputs"
+            secondary = "no output files produced"
+        elif "warning_only:" in primary:
+            classification = "warning_only"
+
+        print(f"[{idx}/{total}] FAIL {rel} rc={proc.returncode} in {dt:.1f}s", flush=True)
+        return {
+            "status": "failed",
+            "failure": {
+                "fbx": str(fbx),
+                "return_code": proc.returncode,
+                "log": str(run_log),
+                "classification": classification,
+                "primary_reason": primary,
+                "secondary_reason": secondary,
+            },
+        }
+
+    jobs = max(1, args.jobs)
+    if jobs == 1:
+        results = [process_one(idx, fbx) for idx, fbx in enumerate(fbx_files, start=1)]
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(lambda pair: process_one(pair[0], pair[1]), enumerate(fbx_files, start=1)))
+
+    for result in results:
+        status = result["status"]
+        if status == "skipped":
+            skipped += 1
+        elif status == "succeeded":
+            processed += 1
+            succeeded += 1
+        else:
+            processed += 1
+            failed += 1
+            failures.append(result["failure"])
 
     elapsed = time.perf_counter() - t_batch
     finished_at = datetime.now().isoformat(timespec="seconds")
@@ -397,6 +417,7 @@ def main() -> int:
             "apply_modifiers": args.apply_modifiers,
             "bake_colors": args.bake_colors,
             "bake_res": args.bake_res,
+            "jobs": args.jobs,
             "rot_offset": args.rot_offset,
             "export_animation": args.export_animation,
             "action": args.action,

@@ -155,7 +155,7 @@ def _out_path_for_action(base_out_path, action_name):
     return f"{root}__{_sanitize_name(action_name)}{ext}"
 
 
-def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name="NONE"):
+def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name="NONE", reuse_bake=False):
     for obj in bpy.context.selected_objects:
         obj.select_set(False)
     mesh_obj.select_set(True)
@@ -168,6 +168,7 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
         "apply_modifiers": bool(args.apply_modifiers),
         "bake_colors": bool(args.bake_colors),
         "bake_resolution": max(64, int(args.bake_res)),
+        "reuse_bake": bool(reuse_bake),
         "rotation_offset_deg": float(args.rot_offset),
         "slices_only": True,
         "export_animation": bool(export_animation),
@@ -285,7 +286,7 @@ def main():
         print(f"[Voxelator CLI] Action {idx}/{total_actions}: '{action.name}'", flush=True)
         print(f"[Voxelator CLI] Output: {action_out}", flush=True)
         t0 = time.perf_counter()
-        result = _run_voxelize(joined_mesh, action_out, args, export_animation=True, action_name=action.name)
+        result = _run_voxelize(joined_mesh, action_out, args, export_animation=True, action_name=action.name, reuse_bake=idx > 1)
         if "FINISHED" in result:
             dt = time.perf_counter() - t0
             print(f"[Voxelator CLI] Finished '{action.name}' in {dt:.2f}s", flush=True)
