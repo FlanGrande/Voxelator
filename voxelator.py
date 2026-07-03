@@ -794,11 +794,6 @@ def _flood_fill_outside(dx, dy, dz, shell):
 
 def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
     mesh.calc_loop_triangles()
-    if np is not None:
-        try:
-            return _build_occupied_cells_np(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume)
-        except Exception as exc:
-            _log(f"[Voxelator] Numpy voxelize failed, falling back to Python: {exc}")
     return _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume)
 
 def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
