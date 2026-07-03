@@ -39,6 +39,8 @@ python -m pip install pillow
 - `Fill Volume` - fills interior voxels instead of only surface voxels.
 - `Separate Cubes` - keeps cubes split instead of sharing vertices inside one mesh.
 - `Apply Modifiers` - applies all object modifiers before voxelizing. Enabled by default.
+- `Bake Colors` - bakes the exact evaluated Base Color of every material with Cycles (diffuse color pass, no lighting) and samples voxel colors from the bake. Handles any node graph. Enabled by default.
+- `Bake Resolution` - square resolution of the baked color image. Default `1024`.
 - `Rotation Offset Z` - rotates the model around Z before voxelization.
 - `Animation` - selects an action from the current Blender file.
 - `Export Animation` - exports selected animation frames to one stacked PNG.
@@ -118,6 +120,8 @@ FolderName__ActionName.png
 | `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
+| `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |
+| `--bake-res` | `1024` | Bake image resolution. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animation spritesheet. |
 | `--action` | `DefaultPose` | Action name, or `All`. |
@@ -192,6 +196,8 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
+| `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |
+| `--bake-res` | `1024` | Bake image resolution. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animations. |
 | `--action` | `All` | Action name, or `All`. |

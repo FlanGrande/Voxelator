@@ -207,6 +207,8 @@ def main() -> int:
     parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (default: 0)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (default: 0)")
     parser.add_argument("--apply-modifiers", type=int, choices=(0, 1), default=1, help="Apply modifiers before voxelizing (default: 1)")
+    parser.add_argument("--bake-colors", type=int, choices=(0, 1), default=1, help="Bake exact base colors with Cycles before sampling (default: 1)")
+    parser.add_argument("--bake-res", type=int, default=1024, help="Bake image resolution (default: 1024)")
     parser.add_argument("--rot-offset", type=float, default=0.0, help="Z rotation offset in degrees (default: 0)")
     parser.add_argument("--export-animation", type=int, choices=(0, 1), default=0, help="Export animations (default: 0)")
     parser.add_argument("--action", default="All", help="Action name or All (default: All)")
@@ -310,6 +312,10 @@ def main() -> int:
             str(args.separate),
             "--apply-modifiers",
             str(args.apply_modifiers),
+            "--bake-colors",
+            str(args.bake_colors),
+            "--bake-res",
+            str(max(64, args.bake_res)),
             "--rot-offset",
             str(args.rot_offset),
             "--export-animation",
@@ -389,6 +395,8 @@ def main() -> int:
             "fill": args.fill,
             "separate": args.separate,
             "apply_modifiers": args.apply_modifiers,
+            "bake_colors": args.bake_colors,
+            "bake_res": args.bake_res,
             "rot_offset": args.rot_offset,
             "export_animation": args.export_animation,
             "action": args.action,

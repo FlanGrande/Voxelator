@@ -861,7 +861,126 @@ def _generated_coord(location, min_v, max_v):
         (location.z - min_v.z) / span.z if abs(span.z) > 1e-8 else 0.0,
     ))
 
-def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None):
+def _uv_from_loop_tri_flat(location_local, loop_tri, uv_flat, verts):
+    verts_idx = loop_tri.vertices
+    a = verts[verts_idx[0]].co
+    b = verts[verts_idx[1]].co
+    c = verts[verts_idx[2]].co
+    bary = _barycentric_coords(location_local, a, b, c)
+    if bary is None:
+        return None
+    u, v, w = bary
+    l0, l1, l2 = loop_tri.loops
+    uv_x = uv_flat[l0 * 2] * u + uv_flat[l1 * 2] * v + uv_flat[l2 * 2] * w
+    uv_y = uv_flat[l0 * 2 + 1] * u + uv_flat[l1 * 2 + 1] * v + uv_flat[l2 * 2 + 1] * w
+    return (float(uv_x), float(uv_y))
+
+def _bake_base_color_image(context, obj, resolution):
+    """Bake the exact evaluated Base Color (Cycles diffuse color pass) of all
+    materials on obj into one image, using a dedicated non-overlapping UV layer.
+    Returns (image, uv_flat) or (None, None) on failure."""
+    mesh = obj.data
+    if not any(mesh.materials):
+        _log("[Voxelator] Bake skipped: no materials")
+        return None, None
+
+    scene = context.scene
+    prev_engine = scene.render.engine
+    prev_samples = None
+    prev_active = context.view_layer.objects.active
+    prev_selected = list(context.selected_objects)
+    temp_nodes = []
+    restore_use_nodes = []
+    image = None
+
+    try:
+        for o in context.selected_objects:
+            o.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        bake_uv = mesh.uv_layers.new(name="VoxelBake")
+        if bake_uv is None:
+            _log("[Voxelator] Bake skipped: could not create UV layer")
+            return None, None
+        mesh.uv_layers.active = bake_uv
+
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.02)
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        resolution = max(64, int(resolution))
+        image = bpy.data.images.new(f"VoxelBake_{obj.name}", width=resolution, height=resolution, alpha=True, float_buffer=False)
+
+        for mat in mesh.materials:
+            if not mat:
+                continue
+            if not mat.use_nodes:
+                restore_use_nodes.append(mat)
+                mat.use_nodes = True
+            node_tree = mat.node_tree
+            tex = node_tree.nodes.new('ShaderNodeTexImage')
+            tex.image = image
+            tex.select = True
+            node_tree.nodes.active = tex
+            temp_nodes.append((node_tree, tex))
+
+        scene.render.engine = 'CYCLES'
+        try:
+            prev_samples = scene.cycles.samples
+            scene.cycles.samples = 1
+        except Exception:
+            prev_samples = None
+
+        bake_start = time.perf_counter()
+        bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'}, margin=4, use_selected_to_active=False)
+        _log(f"[Voxelator][Timing] Base color bake ({resolution}x{resolution}): {time.perf_counter() - bake_start:.3f}s")
+
+        uv_flat = [0.0] * (len(mesh.loops) * 2)
+        mesh.uv_layers["VoxelBake"].data.foreach_get("uv", uv_flat)
+        return image, uv_flat
+    except Exception as exc:
+        _log(f"[Voxelator] Bake failed, falling back to node sampling: {exc}")
+        if image is not None:
+            try:
+                bpy.data.images.remove(image)
+            except Exception:
+                pass
+        return None, None
+    finally:
+        for node_tree, tex in temp_nodes:
+            try:
+                node_tree.nodes.remove(tex)
+            except Exception:
+                pass
+        for mat in restore_use_nodes:
+            try:
+                mat.use_nodes = False
+            except Exception:
+                pass
+        if prev_samples is not None:
+            try:
+                scene.cycles.samples = prev_samples
+            except Exception:
+                pass
+        try:
+            scene.render.engine = prev_engine
+        except Exception:
+            pass
+        for o in context.selected_objects:
+            o.select_set(False)
+        for o in prev_selected:
+            try:
+                o.select_set(True)
+            except Exception:
+                pass
+        try:
+            context.view_layer.objects.active = prev_active
+        except Exception:
+            pass
+
+def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None, bake_data=None):
     mapped_count = 0
     cube_color_map = {}
     source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
@@ -875,8 +994,19 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
     loop_tris = list(source_mesh.loop_triangles)
     uv_layer = source_mesh.uv_layers.active
     uv_data = uv_layer.data if uv_layer else None
+    bake_image = None
+    bake_uv_flat = None
+    if bake_data:
+        bake_image, bake_uv_flat = bake_data
+    use_bake = bool(
+        bake_image is not None
+        and bake_uv_flat
+        and len(bake_uv_flat) == len(source_loops) * 2
+    )
+    if bake_data and not use_bake:
+        _log("[Voxelator] Bake data mismatch with mesh loops; using fallback sampling")
     loop_tris_by_poly = {}
-    if uv_data:
+    if uv_data or use_bake:
         for loop_tri in loop_tris:
             loop_tris_by_poly.setdefault(loop_tri.polygon_index, []).append(loop_tri)
     mat_source_cache = mat_source_cache if mat_source_cache is not None else {}
@@ -914,14 +1044,26 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
             if result and poly_index < len(source_polys):
                 poly = source_polys[poly_index]
         if result and poly is not None:
-            if poly.material_index < len(source_mats):
+            color = None
+
+            if use_bake:
+                bake_uv = None
+                if loop_tri is not None:
+                    bake_uv = _uv_from_loop_tri_flat(location, loop_tri, bake_uv_flat, source_verts)
+                else:
+                    for candidate_tri in loop_tris_by_poly.get(poly.index, ()):
+                        bake_uv = _uv_from_loop_tri_flat(location, candidate_tri, bake_uv_flat, source_verts)
+                        if bake_uv is not None:
+                            break
+                if bake_uv is not None:
+                    color = _sample_image_bilinear(bake_image, bake_uv, image_cache)
+
+            if color is None and poly.material_index < len(source_mats):
                 mat = source_mats[poly.material_index]
                 if mat:
-                    mapped_count += 1
-
                     source_info = _get_material_color_source(mat, mat_source_cache)
                     if source_info[0] == "solid":
-                        cube_color_map[(ix, iy, iz)] = source_info[1]
+                        color = source_info[1]
                     else:
                         uv = None
                         if uv_data:
@@ -934,15 +1076,19 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
 
                         if source_info[0] == "image":
                             sampled = _sample_image_bilinear(source_info[1], uv, image_cache) if uv is not None else None
-                            cube_color_map[(ix, iy, iz)] = sampled if sampled is not None else source_info[2]
+                            color = sampled if sampled is not None else source_info[2]
                         elif source_info[0] == "node":
                             sample_ctx = {
                                 "local": location,
                                 "generated": _generated_coord(location, min_v, max_v),
                                 "uv": uv,
                             }
-                            color = _eval_node_socket(source_info[1], sample_ctx, image_cache)
-                            cube_color_map[(ix, iy, iz)] = _rgba_tuple(color, source_info[2])
+                            evaluated = _eval_node_socket(source_info[1], sample_ctx, image_cache)
+                            color = _rgba_tuple(evaluated, source_info[2])
+
+            if color is not None:
+                mapped_count += 1
+                cube_color_map[(ix, iy, iz)] = color
         if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
             _log(f"[Voxelator] Material map {i+1}/{n_occ}")
 
@@ -978,6 +1124,18 @@ class OBJECT_OT_voxelize(Operator):
         name="Apply Modifiers",
         description="Voxelize the evaluated mesh with all modifiers applied",
         default=True,
+    )
+    bake_colors: bpy.props.BoolProperty(
+        name="Bake Colors",
+        description="Bake exact material base colors with Cycles (diffuse color pass) and sample voxel colors from the bake",
+        default=True,
+    )
+    bake_resolution: bpy.props.IntProperty(
+        name="Bake Resolution",
+        description="Square resolution of the baked base color image",
+        default=1024,
+        min=64,
+        max=8192,
     )
     rotation_offset_deg: bpy.props.FloatProperty(
         name="Rotation Offset Z",
@@ -1039,6 +1197,9 @@ class OBJECT_OT_voxelize(Operator):
         layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
         layout.prop(self, "apply_modifiers")
+        layout.prop(self, "bake_colors")
+        if self.bake_colors:
+            layout.prop(self, "bake_resolution")
         layout.prop(self, "rotation_offset_deg")
         layout.prop(self, "animation_action")
         layout.prop(self, "export_animation")
@@ -1070,6 +1231,7 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] apply_modifiers: {self.apply_modifiers}")
+        _log(f"[Voxelator] bake_colors: {self.bake_colors} bake_resolution: {self.bake_resolution}")
         _log(f"[Voxelator] rotation_offset_deg: {self.rotation_offset_deg}")
         _log(f"[Voxelator] animation: {self.animation_action}")
         _log(f"[Voxelator] export_animation: {self.export_animation} frame_step: {self.frame_step}")
@@ -1197,6 +1359,19 @@ class OBJECT_OT_voxelize(Operator):
                 _log(f"[Voxelator] cube_size={cube_size:.6f} cell_len={cell_len:.6f}")
                 _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
+                bake_image = None
+                bake_uv_flat = None
+                if self.bake_colors:
+                    scene.frame_set(frames[0])
+                    bake_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
+                    bake_obj = bpy.data.objects.new(source_name + "_voxel_bake", bake_mesh)
+                    context.collection.objects.link(bake_obj)
+                    try:
+                        bake_image, bake_uv_flat = _bake_base_color_image(context, bake_obj, self.bake_resolution)
+                    finally:
+                        bpy.data.objects.remove(bake_obj, do_unlink=True)
+                        bpy.data.meshes.remove(bake_mesh)
+
                 frame_color_maps = []
                 anim_mat_source_cache = {}
                 anim_image_cache = {}
@@ -1220,6 +1395,7 @@ class OBJECT_OT_voxelize(Operator):
                             world_to_source_matrix=processing_matrix.inverted(),
                             mat_source_cache=anim_mat_source_cache,
                             image_cache=anim_image_cache,
+                            bake_data=(bake_image, bake_uv_flat) if bake_image is not None else None,
                         )
                     finally:
                         bpy.data.objects.remove(color_source, do_unlink=True)
@@ -1227,6 +1403,11 @@ class OBJECT_OT_voxelize(Operator):
                     frame_color_maps.append(cube_color_map)
                     _log(f"[Voxelator] Frame {frame}: mapped={mapped_count} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
 
+                if bake_image is not None:
+                    try:
+                        bpy.data.images.remove(bake_image)
+                    except Exception:
+                        pass
                 _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
 
                 _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
@@ -1323,7 +1504,26 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Occupancy bookkeeping: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
-        mapped_count, cube_color_map = _build_cube_maps(target, occupied, ox, oy, oz, cell_len, world_to_source_matrix=processing_matrix.inverted())
+        bake_image = None
+        bake_uv_flat = None
+        if self.bake_colors:
+            bake_image, bake_uv_flat = _bake_base_color_image(context, target, self.bake_resolution)
+
+        mapped_count, cube_color_map = _build_cube_maps(
+            target,
+            occupied,
+            ox,
+            oy,
+            oz,
+            cell_len,
+            world_to_source_matrix=processing_matrix.inverted(),
+            bake_data=(bake_image, bake_uv_flat) if bake_image is not None else None,
+        )
+        if bake_image is not None:
+            try:
+                bpy.data.images.remove(bake_image)
+            except Exception:
+                pass
         _log(f"[Voxelator] Material mapped: {mapped_count} colorized: {len(cube_color_map)}")
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
