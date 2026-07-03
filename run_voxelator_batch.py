@@ -205,7 +205,6 @@ def main() -> int:
     parser.add_argument("--blender", default="blender", help="Blender executable path")
     parser.add_argument("--runner", default="", help="Path to run_voxelator_fbx.py (default: sibling file)")
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
-    parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (default: 0)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (default: 0)")
     parser.add_argument("--apply-modifiers", type=int, choices=(0, 1), default=1, help="Apply modifiers before voxelizing (default: 1)")
     parser.add_argument("--bake-colors", type=int, choices=(0, 1), default=1, help="Bake exact base colors with Cycles before sampling (default: 1)")
@@ -307,8 +306,6 @@ def main() -> int:
             str(out_path),
             "--res",
             str(max(1, args.res)),
-            "--fill",
-            str(args.fill),
             "--separate",
             str(args.separate),
             "--apply-modifiers",
@@ -412,7 +409,6 @@ def main() -> int:
         "cleaned_files": cleaned_files,
         "settings": {
             "res": args.res,
-            "fill": args.fill,
             "separate": args.separate,
             "apply_modifiers": args.apply_modifiers,
             "bake_colors": args.bake_colors,

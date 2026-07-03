@@ -15,7 +15,6 @@ import bpy
 import os
 import time
 import math
-from collections import deque
 
 try:
     import numpy as np
@@ -628,175 +627,11 @@ def _world_bounds(mesh, matrix_world):
         (max(v.x for v in verts_world), max(v.y for v in verts_world), max(v.z for v in verts_world)),
     )
 
-def _flood_fill_outside_np(occ):
-    """Numpy flood fill from grid boundary through empty cells. Returns outside bool array."""
-    outside = np.zeros_like(occ)
-    empty = ~occ
-    outside[0, :, :] = empty[0, :, :]
-    outside[-1, :, :] |= empty[-1, :, :]
-    outside[:, 0, :] |= empty[:, 0, :]
-    outside[:, -1, :] |= empty[:, -1, :]
-    outside[:, :, 0] |= empty[:, :, 0]
-    outside[:, :, -1] |= empty[:, :, -1]
-
-    frontier = outside.copy()
-    while frontier.any():
-        grown = np.zeros_like(occ)
-        grown[1:, :, :] |= frontier[:-1, :, :]
-        grown[:-1, :, :] |= frontier[1:, :, :]
-        grown[:, 1:, :] |= frontier[:, :-1, :]
-        grown[:, :-1, :] |= frontier[:, 1:, :]
-        grown[:, :, 1:] |= frontier[:, :, :-1]
-        grown[:, :, :-1] |= frontier[:, :, 1:]
-        grown &= empty
-        grown &= ~outside
-        outside |= grown
-        frontier = grown
-    return outside
-
-def _build_occupied_cells_np(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
-    """Vectorized triangle-box occupancy. Returns set of (ix, iy, iz)."""
-    verts_w = _world_verts_np(mesh, matrix_world)
-
-    tri_count = len(mesh.loop_triangles)
-    tri_idx = np.empty(tri_count * 3, dtype=np.int64)
-    mesh.loop_triangles.foreach_get("vertices", tri_idx)
-    tri_idx = tri_idx.reshape(tri_count, 3)
-
-    half = 0.5 * cell_len
-    occ = np.zeros((dx, dy, dz), dtype=bool)
-    grid_min = np.array((grid_min_x, grid_min_y, grid_min_z), dtype=np.float64)
-    step = max(1, tri_count // 10) if tri_count else 1
-
-    tri_a = verts_w[tri_idx[:, 0]]
-    tri_b = verts_w[tri_idx[:, 1]]
-    tri_c = verts_w[tri_idx[:, 2]]
-    tri_min = np.minimum(np.minimum(tri_a, tri_b), tri_c)
-    tri_max = np.maximum(np.maximum(tri_a, tri_b), tri_c)
-    lo = np.maximum(0, np.floor((tri_min - grid_min) / cell_len).astype(np.int64) - 1)
-    hi = np.minimum(
-        np.array((dx - 1, dy - 1, dz - 1), dtype=np.int64),
-        np.floor((tri_max - grid_min) / cell_len).astype(np.int64) + 1,
-    )
-
-    for ti in range(tri_count):
-        ix0, iy0, iz0 = lo[ti]
-        ix1, iy1, iz1 = hi[ti]
-        if ix1 < ix0 or iy1 < iy0 or iz1 < iz0:
-            continue
-
-        a = tri_a[ti]
-        b = tri_b[ti]
-        c = tri_c[ti]
-
-        gx = grid_min_x + (np.arange(ix0, ix1 + 1, dtype=np.float64) + 0.5) * cell_len
-        gy = grid_min_y + (np.arange(iy0, iy1 + 1, dtype=np.float64) + 0.5) * cell_len
-        gz = grid_min_z + (np.arange(iz0, iz1 + 1, dtype=np.float64) + 0.5) * cell_len
-        centers = np.stack(np.meshgrid(gx, gy, gz, indexing="ij"), axis=-1).reshape(-1, 3)
-
-        v0 = a - centers
-        v1 = b - centers
-        v2 = c - centers
-
-        e0 = b - a
-        e1 = c - b
-        e2 = a - c
-
-        keep = np.ones(len(centers), dtype=bool)
-
-        for ex, ey, ez in (e0, e1, e2):
-            for axis in ((0.0, -ez, ey), (ez, 0.0, -ex), (-ey, ex, 0.0)):
-                ax, ay, az = axis
-                rad = half * (abs(ax) + abs(ay) + abs(az))
-                p0 = v0[:, 0] * ax + v0[:, 1] * ay + v0[:, 2] * az
-                p1 = v1[:, 0] * ax + v1[:, 1] * ay + v1[:, 2] * az
-                p2 = v2[:, 0] * ax + v2[:, 1] * ay + v2[:, 2] * az
-                min_p = np.minimum(np.minimum(p0, p1), p2)
-                max_p = np.maximum(np.maximum(p0, p1), p2)
-                keep &= (min_p <= rad) & (max_p >= -rad)
-                if not keep.any():
-                    break
-            else:
-                continue
-            break
-
-        if keep.any():
-            for axis_i in range(3):
-                mn = np.minimum(np.minimum(v0[:, axis_i], v1[:, axis_i]), v2[:, axis_i])
-                mx = np.maximum(np.maximum(v0[:, axis_i], v1[:, axis_i]), v2[:, axis_i])
-                keep &= (mn <= half) & (mx >= -half)
-
-        if keep.any():
-            normal = np.cross(e0, e1)
-            rad = half * (abs(normal[0]) + abs(normal[1]) + abs(normal[2]))
-            dist = v0[:, 0] * normal[0] + v0[:, 1] * normal[1] + v0[:, 2] * normal[2]
-            keep &= np.abs(dist) <= rad
-
-        if keep.any():
-            hit = np.nonzero(keep)[0]
-            ny = iy1 - iy0 + 1
-            nz = iz1 - iz0 + 1
-            hix = ix0 + hit // (ny * nz)
-            hiy = iy0 + (hit // nz) % ny
-            hiz = iz0 + hit % nz
-            occ[hix, hiy, hiz] = True
-
-        if ((ti + 1) % step) == 0 or (ti + 1) == tri_count:
-            _log(f"[Voxelator] Surface voxelize {ti+1}/{tri_count}")
-
-    shell_count = int(occ.sum())
-    if fill_volume:
-        outside = _flood_fill_outside_np(occ)
-        occ |= ~outside
-        _log(f"[Voxelator] Volume fill: shell={shell_count} outside={int(outside.sum())} total={int(occ.sum())}")
-
-    xs, ys, zs = np.nonzero(occ)
-    return {(int(x), int(y), int(z)) for x, y, z in zip(xs, ys, zs)}
-
-def _flood_fill_outside(dx, dy, dz, shell):
-    outside = set()
-    q = deque()
-
-    def try_push(ix, iy, iz):
-        cell = (ix, iy, iz)
-        if cell in shell or cell in outside:
-            return
-        outside.add(cell)
-        q.append(cell)
-
-    for ix in range(dx):
-        for iy in range(dy):
-            try_push(ix, iy, 0)
-            try_push(ix, iy, dz - 1)
-    for ix in range(dx):
-        for iz in range(dz):
-            try_push(ix, 0, iz)
-            try_push(ix, dy - 1, iz)
-    for iy in range(dy):
-        for iz in range(dz):
-            try_push(0, iy, iz)
-            try_push(dx - 1, iy, iz)
-
-    neigh = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
-    while q:
-        ix, iy, iz = q.popleft()
-        for nx, ny, nz in neigh:
-            tx = ix + nx
-            ty = iy + ny
-            tz = iz + nz
-            if 0 <= tx < dx and 0 <= ty < dy and 0 <= tz < dz:
-                cell = (tx, ty, tz)
-                if cell not in shell and cell not in outside:
-                    outside.add(cell)
-                    q.append(cell)
-
-    return outside
-
-def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
+def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):
     mesh.calc_loop_triangles()
-    return _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume)
+    return _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
 
-def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, fill_volume):
+def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):
     verts_w = [matrix_world @ v.co for v in mesh.vertices]
 
     half = 0.5 * cell_len
@@ -840,19 +675,7 @@ def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_
         if ((ti + 1) % step) == 0 or (ti + 1) == total_tris:
             _log(f"[Voxelator] Surface voxelize {ti+1}/{total_tris}")
 
-    if not fill_volume:
-        return shell
-
-    outside = _flood_fill_outside(dx, dy, dz, shell)
-    occupied = set(shell)
-    for ix in range(dx):
-        for iy in range(dy):
-            for iz in range(dz):
-                cell = (ix, iy, iz)
-                if cell not in outside:
-                    occupied.add(cell)
-    _log(f"[Voxelator] Volume fill: shell={len(shell)} outside={len(outside)} total={len(occupied)}")
-    return occupied
+    return shell
 
 def _build_voxel_mesh_data(occupied_cells, ox, oy, oz, cell_len, separate_cubes):
     face_defs = (
@@ -1311,11 +1134,6 @@ class OBJECT_OT_voxelize(Operator):
         description = "Maximum amount of cubes used per axis of mesh. *warning*: amounts higher than 32 can result in long load times during voxelization.",
     )
     
-    fill_volume: bpy.props.BoolProperty(
-        name="Fill Volume",
-        description="Fill the inside of the voxelized mesh with cubes as well.",
-        default = False
-    )
     separate_cubes: bpy.props.BoolProperty(
         name="Separate Cubes",
         description="Keep cubes as separate meshes inside the same object.",
@@ -1400,7 +1218,6 @@ class OBJECT_OT_voxelize(Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "voxelizeResolution")
-        layout.prop(self, "fill_volume")
         layout.prop(self, "separate_cubes")
         layout.prop(self, "apply_modifiers")
         layout.prop(self, "bake_colors")
@@ -1435,7 +1252,7 @@ class OBJECT_OT_voxelize(Operator):
             LOG_FILE = bpy.path.abspath(log_path)
 
         _log(f"[Voxelator] Start: {source_name}")
-        _log(f"[Voxelator] res: {self.voxelizeResolution} fill_volume: {self.fill_volume} separate_cubes: {self.separate_cubes}")
+        _log(f"[Voxelator] res: {self.voxelizeResolution} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] apply_modifiers: {self.apply_modifiers}")
         _log(f"[Voxelator] bake_colors: {self.bake_colors} bake_resolution: {self.bake_resolution}")
         _log(f"[Voxelator] rotation_offset_deg: {self.rotation_offset_deg}")
@@ -1596,7 +1413,7 @@ class OBJECT_OT_voxelize(Operator):
                     scene.frame_set(frame)
                     eval_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
                     processing_matrix = source.matrix_world @ rot_offset_matrix
-                    occupied = _build_occupied_cells_from_mesh(eval_mesh, processing_matrix, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
+                    occupied = _build_occupied_cells_from_mesh(eval_mesh, processing_matrix, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
                     _log(f"[Voxelator] Frame {frame}: occupied={len(occupied)}")
 
                     color_source = bpy.data.objects.new(source_name + "_voxel_color_source", eval_mesh)
@@ -1701,8 +1518,8 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
         surface_start = time.perf_counter()
-        occupied = _build_occupied_cells_from_mesh(target.data, target.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz, self.fill_volume)
-        _log(f"[Voxelator][Timing] Surface/volume voxelize: {time.perf_counter() - surface_start:.3f}s")
+        occupied = _build_occupied_cells_from_mesh(target.data, target.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
+        _log(f"[Voxelator][Timing] Surface voxelize: {time.perf_counter() - surface_start:.3f}s")
         stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Grid: {dx}x{dy}x{dz}")

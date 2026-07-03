@@ -36,7 +36,6 @@ python -m pip install pillow
 ### Add-On Options
 
 - `Voxel Resolution` - number of cells on the longest mesh axis. Higher values create more detail but take much longer.
-- `Fill Volume` - fills interior voxels instead of only surface voxels.
 - `Separate Cubes` - keeps cubes split instead of sharing vertices inside one mesh.
 - `Apply Modifiers` - applies all object modifiers before voxelizing. Enabled by default.
 - `Bake Colors` - bakes the exact evaluated Base Color of every material with Cycles (diffuse color pass, no lighting) and samples voxel colors from the bake. Handles any node graph. Enabled by default.
@@ -73,7 +72,6 @@ Use Blender in background mode with `run_voxelator_fbx.py`:
 blender -b -P run_voxelator_fbx.py -- \
   --fbx "/path/to/model.fbx" \
   --res 64 \
-  --fill 0 \
   --separate 0 \
   --apply-modifiers 1
 ```
@@ -117,7 +115,6 @@ FolderName__ActionName.png
 | `--fbx` | required | Input FBX path. |
 | `--out` | parent folder name | Output PNG path or filename. |
 | `--res` | `64` | Voxel resolution on longest axis. |
-| `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |
@@ -193,7 +190,6 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--blender` | `blender` | Blender executable path. |
 | `--runner` | sibling `run_voxelator_fbx.py` | Single-FBX runner path. |
 | `--res` | `64` | Voxel resolution. |
-| `--fill` | `0` | `1` fills interior volume. |
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |

@@ -4,7 +4,7 @@
 Usage:
   blender -b -P run_voxelator_fbx.py -- \
     --fbx "/path/model.fbx" \
-    --res 64 --fill 0 --separate 0 --apply-modifiers 1 \
+    --res 64 --separate 0 --apply-modifiers 1 \
     --export-animation 1 --action "All" --frame-step 2
 """
 
@@ -163,7 +163,6 @@ def _run_voxelize(mesh_obj, out_path, args, export_animation=False, action_name=
 
     op_args = {
         "voxelizeResolution": max(1, int(args.res)),
-        "fill_volume": bool(args.fill),
         "separate_cubes": bool(args.separate),
         "apply_modifiers": bool(args.apply_modifiers),
         "bake_colors": bool(args.bake_colors),
@@ -201,7 +200,6 @@ def main():
     parser.add_argument("--fbx", required=True, help="Input FBX path")
     parser.add_argument("--out", default="", help="Output PNG path or filename (default: parent folder name)")
     parser.add_argument("--res", type=int, default=64, help="Voxel resolution (default: 64)")
-    parser.add_argument("--fill", type=int, choices=(0, 1), default=0, help="Fill volume (0/1)")
     parser.add_argument("--separate", type=int, choices=(0, 1), default=0, help="Separate cubes (0/1)")
     parser.add_argument("--apply-modifiers", type=int, choices=(0, 1), default=1, help="Apply modifiers before voxelizing (0/1, default: 1)")
     parser.add_argument("--bake-colors", type=int, choices=(0, 1), default=1, help="Bake exact base colors with Cycles before sampling (0/1, default: 1)")
