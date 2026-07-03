@@ -53,6 +53,58 @@ def _log(msg):
         except Exception:
             pass
 
+class _ProgressReporter:
+    """Small wrapper around Blender's status-bar progress API; no-op in headless contexts."""
+    def __init__(self, context):
+        self.wm = getattr(context, "window_manager", None)
+        self.workspace = getattr(context, "workspace", None)
+        self.started = False
+        self.value = 0.0
+
+    def begin(self, message="Starting"):
+        if self.wm:
+            try:
+                self.wm.progress_begin(0.0, 100.0)
+                self.started = True
+            except Exception:
+                self.started = False
+        self.update(0.0, message)
+
+    def update(self, value, message=None):
+        value = max(0.0, min(100.0, float(value)))
+        if value < self.value:
+            value = self.value
+        self.value = value
+        if self.wm and self.started:
+            try:
+                self.wm.progress_update(self.value)
+            except Exception:
+                pass
+        if message and self.workspace:
+            try:
+                self.workspace.status_text_set(f"Voxelator: {message} ({self.value:.0f}%)")
+            except Exception:
+                pass
+
+    def end(self, message="Finished"):
+        self.update(100.0, message)
+        if self.workspace:
+            try:
+                self.workspace.status_text_set(None)
+            except Exception:
+                pass
+        if self.wm and self.started:
+            try:
+                self.wm.progress_end()
+            except Exception:
+                pass
+        self.started = False
+
+def _progress_range(progress, start, end, index, total, message):
+    if not progress or total <= 0:
+        return
+    progress.update(start + (end - start) * (index / total), message)
+
 def _clamp01(value):
     return max(0.0, min(1.0, float(value)))
 
@@ -437,7 +489,7 @@ def _build_layer_color_map(dx, dy, dz, cube_color_map):
             layers[iz][(ix, iy)] = color
     return layers
 
-def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=None, row_count=1, row_index=0, align_left=False):
+def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=None, row_count=1, row_index=0, align_left=False, progress=None, progress_start=0.0, progress_end=100.0, progress_label="Building spritesheet"):
     tile = int(tile_size) if tile_size is not None else max(dx, dy)
     off_x = 0 if align_left else (tile - dx) // 2
     off_y = (tile - dy) // 2
@@ -457,8 +509,9 @@ def _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=
                 px[idx + 3] = color[3] if len(color) > 3 else 1.0
         if row_count == 1 and (((z + 1) % step_z) == 0 or (z + 1) == dz):
             _log(f"[Voxelator] Spritesheet fill {z+1}/{dz}")
+            _progress_range(progress, progress_start, progress_end, z + 1, dz, progress_label)
 
-def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_color_map, tile_size):
+def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_color_map, tile_size, progress=None, progress_start=85.0, progress_end=95.0):
     layers = _build_layer_color_map(dx, dy, dz, cube_color_map)
 
     cube_count = len(cube_color_map)
@@ -474,14 +527,16 @@ def _save_voxel_spritesheet(dx, dy, dz, filepath, cube_color_map, tile_size):
     img = bpy.data.images.new(f"voxel_slices_{base}", width=width, height=height, alpha=True, float_buffer=False)
     px = [0.0] * (width * height * 4)
     _log(f"[Voxelator] Spritesheet dimensions: {width} x {height}")
-    _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile)
+    _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile, progress=progress, progress_start=progress_start, progress_end=progress_end, progress_label="Building spritesheet")
+    if progress:
+        progress.update(progress_end, "Saving spritesheet PNG")
     img.pixels.foreach_set(px)
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
     img.save()
     _log(f"[Voxelator] Saved spritesheet: {abs_path}")
 
-def _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, filepath, tile_size):
+def _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, filepath, tile_size, progress=None, progress_start=85.0, progress_end=100.0):
     frame_count = len(frame_color_maps)
     tile = max(1, int(tile_size))
     if dx > tile or dy > tile:
@@ -500,7 +555,10 @@ def _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, filepath, ti
         layers = _build_layer_color_map(dx, dy, dz, cube_color_map)
         _render_layers_into_pixels(px, width, height, layers, dx, dy, dz, tile_size=tile, row_count=frame_count, row_index=i, align_left=False)
         _log(f"[Voxelator] Animation row {i+1}/{frame_count}")
+        _progress_range(progress, progress_start, progress_end, i + 1, frame_count, "Building animation spritesheet")
 
+    if progress:
+        progress.update(progress_end, "Saving animation spritesheet PNG")
     img.pixels.foreach_set(px)
     img.filepath_raw = abs_path
     img.file_format = 'PNG'
@@ -1080,7 +1138,7 @@ def _bake_base_color_image(context, obj, resolution):
         except Exception:
             pass
 
-def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None, bake_data=None):
+def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None, bake_data=None, progress=None, progress_start=45.0, progress_end=85.0, progress_label="Mapping voxel colors"):
     mapped_count = 0
     cube_color_map = {}
     source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
@@ -1203,6 +1261,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
                 cube_color_map[(ix, iy, iz)] = color
         if ((i + 1) % step_occ) == 0 or (i + 1) == n_occ:
             _log(f"[Voxelator] Material map {i+1}/{n_occ}")
+            _progress_range(progress, progress_start, progress_end, i + 1, n_occ, progress_label)
 
     return mapped_count, cube_color_map
 
@@ -1323,6 +1382,8 @@ class OBJECT_OT_voxelize(Operator):
     def execute(self, context):
         total_start = time.perf_counter()
         stage_start = total_start
+        progress = _ProgressReporter(context)
+        progress.begin("Starting")
 
         global LOG_FILE
         global LOG_TO_STDOUT
@@ -1360,6 +1421,14 @@ class OBJECT_OT_voxelize(Operator):
         rot_rad = math.radians(float(self.rotation_offset_deg))
         rot_offset_matrix = Matrix.Rotation(rot_rad, 4, 'Z')
 
+        try:
+            if self.export_animation:
+                return self._execute_animation(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress)
+            return self._execute_static(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress)
+        finally:
+            progress.end()
+
+    def _execute_animation(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress):
         if self.export_animation:
             if self.animation_action in {"", "NONE"}:
                 _log("[Voxelator] Aborted: no animation selected for export")
@@ -1395,6 +1464,7 @@ class OBJECT_OT_voxelize(Operator):
             _log(f"[Voxelator] Animation range: {frame_start}..{frame_end} (last frame excluded for looping) step={frame_step} sampled={len(frames)}")
 
             try:
+                progress.update(5.0, "Scanning animation bounds")
                 bounds_start = time.perf_counter()
                 min_x = float('inf')
                 min_y = float('inf')
@@ -1420,6 +1490,7 @@ class OBJECT_OT_voxelize(Operator):
                     max_y = max(max_y, bmax_y)
                     max_z = max(max_z, bmax_z)
                     _log(f"[Voxelator] Animation bounds {i+1}/{len(frames)} frame={frame}")
+                    _progress_range(progress, 5.0, 15.0, i + 1, len(frames), "Scanning animation bounds")
 
                 if min_x == float('inf'):
                     _log("[Voxelator] Aborted: no vertices found across sampled animation frames")
@@ -1474,6 +1545,7 @@ class OBJECT_OT_voxelize(Operator):
                 bake_pixels = None
                 bake_uv_flat = None
                 if self.bake_colors:
+                    progress.update(15.0, "Baking base colors")
                     bake_key = (source_name, bool(self.apply_modifiers), int(self.bake_resolution))
                     cached_bake = _BAKE_CACHE.get("entry")
                     if self.reuse_bake and cached_bake and cached_bake["key"] == bake_key:
@@ -1492,12 +1564,16 @@ class OBJECT_OT_voxelize(Operator):
                             bpy.data.meshes.remove(bake_mesh)
                         if bake_pixels is not None:
                             _BAKE_CACHE["entry"] = {"key": bake_key, "pixels": bake_pixels, "uv_flat": bake_uv_flat}
+                progress.update(25.0, "Processing animation frames")
 
                 frame_color_maps = []
                 anim_mat_source_cache = {}
                 anim_image_cache = {}
                 anim_proc_start = time.perf_counter()
                 for i, frame in enumerate(frames):
+                    frame_start_pct = 25.0 + 60.0 * (i / len(frames))
+                    frame_end_pct = 25.0 + 60.0 * ((i + 1) / len(frames))
+                    progress.update(frame_start_pct, f"Processing frame {i+1}/{len(frames)}")
                     scene.frame_set(frame)
                     eval_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
                     processing_matrix = source.matrix_world @ rot_offset_matrix
@@ -1517,18 +1593,24 @@ class OBJECT_OT_voxelize(Operator):
                             mat_source_cache=anim_mat_source_cache,
                             image_cache=anim_image_cache,
                             bake_data=(bake_pixels, bake_uv_flat) if bake_pixels is not None else None,
+                            progress=progress,
+                            progress_start=frame_start_pct + (frame_end_pct - frame_start_pct) * 0.35,
+                            progress_end=frame_end_pct,
+                            progress_label=f"Mapping frame {i+1}/{len(frames)} colors",
                         )
                     finally:
                         bpy.data.objects.remove(color_source, do_unlink=True)
                         bpy.data.meshes.remove(eval_mesh)
                     frame_color_maps.append(cube_color_map)
                     _log(f"[Voxelator] Frame {frame}: mapped={mapped_count} colorized={len(cube_color_map)} ({i+1}/{len(frames)})")
+                    progress.update(frame_end_pct, f"Finished frame {i+1}/{len(frames)}")
 
                 _log(f"[Voxelator][Timing] Animation frame processing: {time.perf_counter() - anim_proc_start:.3f}s")
 
                 _log(f"[Voxelator] Saving animation spritesheet to: {save_path}")
+                progress.update(85.0, "Saving animation spritesheet")
                 sprite_start = time.perf_counter()
-                _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, save_path, self.voxelizeResolution)
+                _save_voxel_animation_spritesheet(frame_color_maps, dx, dy, dz, save_path, self.voxelizeResolution, progress=progress, progress_start=85.0, progress_end=100.0)
                 _log(f"[Voxelator][Timing] Animation spritesheet: {time.perf_counter() - sprite_start:.3f}s")
             finally:
                 scene.frame_set(original_frame)
@@ -1542,6 +1624,9 @@ class OBJECT_OT_voxelize(Operator):
             _log("[Voxelator] Finished")
             self.report({'INFO'}, f"Voxelator completed animation PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
+
+    def _execute_static(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress):
+        progress.update(5.0, "Preparing mesh")
         target_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
         processing_matrix = source.matrix_world @ rot_offset_matrix
@@ -1605,9 +1690,11 @@ class OBJECT_OT_voxelize(Operator):
         oz = grid_min_z + 0.5 * cell_len
         _log(f"[Voxelator] Grid center: ({center_x:.6f}, {center_y:.6f}, {center_z:.6f})")
 
+        progress.update(10.0, "Voxelizing surface")
         surface_start = time.perf_counter()
         occupied = _build_occupied_cells_from_mesh(target.data, target.matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
         _log(f"[Voxelator][Timing] Surface voxelize: {time.perf_counter() - surface_start:.3f}s")
+        progress.update(20.0, "Surface voxelized")
         stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Grid: {dx}x{dy}x{dz}")
@@ -1618,7 +1705,9 @@ class OBJECT_OT_voxelize(Operator):
         bake_pixels = None
         bake_uv_flat = None
         if self.bake_colors:
+            progress.update(25.0, "Baking base colors")
             bake_pixels, bake_uv_flat = _bake_base_color_image(context, target, self.bake_resolution)
+        progress.update(45.0, "Mapping voxel colors")
 
         mapped_count, cube_color_map = _build_cube_maps(
             target,
@@ -1629,13 +1718,18 @@ class OBJECT_OT_voxelize(Operator):
             cell_len,
             world_to_source_matrix=processing_matrix.inverted(),
             bake_data=(bake_pixels, bake_uv_flat) if bake_pixels is not None else None,
+            progress=progress,
+            progress_start=45.0,
+            progress_end=85.0,
+            progress_label="Mapping voxel colors",
         )
         _log(f"[Voxelator] Material mapped: {mapped_count} colorized: {len(cube_color_map)}")
         _log(f"[Voxelator][Timing] Material map: {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
 
         _log(f"[Voxelator] Saving spritesheet to: {save_path}")
-        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_color_map, self.voxelizeResolution)
+        progress.update(85.0, "Saving spritesheet")
+        _save_voxel_spritesheet(dx, dy, dz, save_path, cube_color_map, self.voxelizeResolution, progress=progress, progress_start=85.0, progress_end=95.0)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
 
         if self.slices_only:
@@ -1643,10 +1737,12 @@ class OBJECT_OT_voxelize(Operator):
             _log("[Voxelator] Slices-only mode: skipped voxel mesh build")
             _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
             _log("[Voxelator] Finished")
+            progress.update(100.0, "Finished")
             self.report({'INFO'}, f"Voxelator completed PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
 
         stage_start = time.perf_counter()
+        progress.update(95.0, "Building voxel mesh")
 
         verts, faces, face_cells = _build_voxel_mesh_data(occupied, ox, oy, oz, cell_len, self.separate_cubes)
         mesh_name = source_name + "_voxel_mesh"
@@ -1692,6 +1788,7 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator][Timing] Finalize: {time.perf_counter() - stage_start:.3f}s")
         _log(f"[Voxelator][Timing] Total: {time.perf_counter() - total_start:.3f}s")
         _log("[Voxelator] Finished")
+        progress.update(100.0, "Finished")
         self.report({'INFO'}, f"Voxelator completed mesh + PNG: {os.path.basename(save_path)}")
         return {'FINISHED'}
 

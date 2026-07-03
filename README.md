@@ -34,6 +34,8 @@ python -m pip install pillow
 5. Select one mesh object in the 3D View.
 6. Run `Object > Voxelate`.
 
+While running from Blender UI, Voxelator shows status-bar progress for setup, voxelization, color bake, material mapping, spritesheet export, and voxel mesh build.
+
 ### Add-On Options
 
 - `Voxel Resolution` - number of cells on the longest mesh axis. Higher values create more detail but take much longer.
