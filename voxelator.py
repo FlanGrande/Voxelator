@@ -12,7 +12,9 @@ bl_info = {
 
 
 import bpy
+import ctypes
 import os
+import subprocess
 import time
 import math
 
@@ -627,8 +629,94 @@ def _world_bounds(mesh, matrix_world):
         (max(v.x for v in verts_world), max(v.y for v in verts_world), max(v.z for v in verts_world)),
     )
 
+_NATIVE_FN = None
+_NATIVE_TRIED = False
+
+def _get_native_voxelizer():
+    """Compile (first run) and load libvoxelize.so. Returns the ctypes function or None."""
+    global _NATIVE_FN, _NATIVE_TRIED
+    if _NATIVE_TRIED:
+        return _NATIVE_FN
+    _NATIVE_TRIED = True
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    src_path = os.path.join(base_dir, "voxelize_native.c")
+    lib_path = os.path.join(base_dir, "libvoxelize.so")
+    if not os.path.isfile(src_path):
+        _log(f"[Voxelator] Native voxelizer source not found: {src_path}")
+        return None
+
+    try:
+        needs_build = (not os.path.isfile(lib_path)) or os.path.getmtime(lib_path) < os.path.getmtime(src_path)
+        if needs_build:
+            proc = None
+            for flags in (("-O3", "-fopenmp"), ("-O3",)):
+                cmd = ["cc", *flags, "-shared", "-fPIC", "-o", lib_path, src_path]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode == 0:
+                    _log(f"[Voxelator] Compiled native voxelizer: {' '.join(cmd)}")
+                    break
+            else:
+                err = (proc.stderr or "").strip()[:300] if proc else "cc not available"
+                _log(f"[Voxelator] Native voxelizer compile failed: {err}")
+                return None
+
+        lib = ctypes.CDLL(lib_path)
+        fn = lib.voxelize_surface
+        fn.restype = ctypes.c_int
+        fn.argtypes = (
+            ctypes.POINTER(ctypes.c_double), ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_int64), ctypes.c_int64,
+            ctypes.c_double,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.c_int64, ctypes.c_int64, ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_uint8),
+        )
+        _NATIVE_FN = fn
+        _log("[Voxelator] Native voxelizer loaded")
+    except Exception as exc:
+        _log(f"[Voxelator] Native voxelizer unavailable: {exc}")
+        _NATIVE_FN = None
+    return _NATIVE_FN
+
+def _build_occupied_cells_native(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):
+    """Native surface voxelize. Returns set of (ix, iy, iz) or None if unavailable."""
+    if np is None:
+        return None
+    fn = _get_native_voxelizer()
+    if fn is None:
+        return None
+
+    verts_w = np.ascontiguousarray(_world_verts_np(mesh, matrix_world), dtype=np.float64)
+    tri_count = len(mesh.loop_triangles)
+    tris = np.empty(tri_count * 3, dtype=np.int64)
+    mesh.loop_triangles.foreach_get("vertices", tris)
+    occ = np.zeros(dx * dy * dz, dtype=np.uint8)
+
+    rc = fn(
+        verts_w.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), len(mesh.vertices),
+        tris.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)), tri_count,
+        float(cell_len),
+        float(grid_min_x), float(grid_min_y), float(grid_min_z),
+        int(dx), int(dy), int(dz),
+        occ.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+    )
+    if rc != 0:
+        _log(f"[Voxelator] Native voxelize returned error code {rc}")
+        return None
+
+    xs, ys, zs = np.nonzero(occ.reshape(dx, dy, dz))
+    _log(f"[Voxelator] Surface voxelize (native): {tri_count} triangles")
+    return {(int(x), int(y), int(z)) for x, y, z in zip(xs, ys, zs)}
+
 def _build_occupied_cells_from_mesh(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):
     mesh.calc_loop_triangles()
+    try:
+        cells = _build_occupied_cells_native(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
+        if cells is not None:
+            return cells
+    except Exception as exc:
+        _log(f"[Voxelator] Native voxelize failed, falling back to Python: {exc}")
     return _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz)
 
 def _build_occupied_cells_py(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):

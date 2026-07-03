@@ -19,6 +19,7 @@ python -m pip install pillow
 ## Files
 
 - `voxelator.py` - Blender add-on and voxelization operator.
+- `voxelize_native.c` - native C surface voxelizer, auto-compiled on first run.
 - `run_voxelator_fbx.py` - headless Blender runner for one `.fbx` file.
 - `run_voxelator_batch.py` - recursive batch runner for folders of `.fbx` files.
 - `make_vertical_spritesheet.py` - stacks PNG files vertically.
@@ -47,6 +48,10 @@ python -m pip install pillow
 - `Slices Only` - exports PNG slices without building the voxel mesh.
 - `Slices PNG` - output path for generated PNG.
 - `Log File` - output path for processing log.
+
+### Native Voxelizer
+
+The surface voxelization loop is implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python voxelizer and logs the reason. Delete `libvoxelize.so` to force a rebuild.
 
 ## Output Format
 

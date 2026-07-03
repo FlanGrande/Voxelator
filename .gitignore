@@ -1,6 +1,7 @@
 *.fbx
 *.log
 *.png
+*.so
 /__pycache__/voxelator.cpython-314.pyc
 /Output/
 /Logs/
