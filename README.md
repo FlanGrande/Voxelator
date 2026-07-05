@@ -20,6 +20,7 @@ python -m pip install pillow
 
 - `voxelator.py` - Blender add-on and voxelization operator.
 - `voxelize_native.c` - native C surface voxelizer, auto-compiled on first run.
+- `preview_voxel_slices.py` - separate Blender preview window for static stacked PNGs.
 - `run_voxelator_fbx.py` - headless Blender runner for one `.fbx` file.
 - `run_voxelator_batch.py` - recursive batch runner for folders of `.fbx` files.
 - `make_vertical_spritesheet.py` - stacks PNG files vertically.
@@ -29,12 +30,14 @@ python -m pip install pillow
 
 1. Open Blender.
 2. Go to `Edit > Preferences > Add-ons > Install`.
-3. Select `voxelator.py`.
+3. Select `VoxelatorAddon/Voxelator.zip`.
 4. Enable the Voxelator add-on.
 5. Select one mesh object in the 3D View.
 6. Run `Object > Voxelate`.
 
 While running from Blender UI, Voxelator shows status-bar progress for setup, voxelization, color bake, material mapping, spritesheet export, and voxel mesh build.
+
+Install the ZIP package, not only `voxelator.py`; the native voxelizer and preview window need the companion files bundled in the package.
 
 ### Add-On Options
 
@@ -49,6 +52,7 @@ While running from Blender UI, Voxelator shows status-bar progress for setup, vo
 - `Frame Step` - samples every Nth animation frame.
 - `Slices Only` - exports PNG slices without building the voxel mesh.
 - `Slices PNG` - output path for generated PNG.
+- `See Preview` - after a static export, opens a separate Blender window that rebuilds the stacked PNG as a rotatable colored voxel mesh.
 - `Log File` - output path for processing log.
 
 ### Native Voxelizer
