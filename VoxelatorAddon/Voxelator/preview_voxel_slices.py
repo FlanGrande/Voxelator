@@ -187,13 +187,15 @@ class PreviewApp:
         self.bg_dark = True
         self.pitch = 0.0
         self.up_axis = "+Z"
+        self.layer_offset = 0.0
         self.rotation_rate = math.radians(135.0)
+        self.offset_rate = 1.0
         self.preview_size = min(640, max(320, model.tile_size * 7))
 
     def run(self) -> None:
         params = hello_imgui.RunnerParams()
         params.app_window_params.window_title = f"Voxelator Preview - {self.model.path.name}"
-        params.app_window_params.window_geometry.size = (self.preview_size + 56, self.preview_size + 440)
+        params.app_window_params.window_geometry.size = (self.preview_size + 116, self.preview_size + 440)
         params.app_window_params.resizable = False
         params.imgui_window_params.show_menu_bar = False
         params.imgui_window_params.show_status_bar = False
@@ -221,7 +223,9 @@ class PreviewApp:
         draw = imgui.get_window_draw_list()
         origin = imgui.get_cursor_screen_pos()
         margin = 24.0
-        panel_w = self.preview_size + margin * 2
+        rail_w = 42.0
+        rail_gap = 12.0
+        panel_w = self.preview_size + rail_gap + rail_w + margin * 2
         panel_h = self.preview_size + 390.0
         panel_bg = _u32(0, 0, 0) if self.bg_dark else _u32(255, 255, 255)
         text_col = _u32(235, 235, 235) if self.bg_dark else _u32(20, 20, 20)
@@ -243,6 +247,7 @@ class PreviewApp:
                 self._rotate(io.mouse_wheel * 0.12)
             if imgui.is_mouse_dragging(imgui.MouseButton_.left, 0.0):
                 self._rotate(io.mouse_delta.x * 0.012)
+                self._adjust_layer_offset(-io.mouse_delta.y * 0.01)
 
         dt = min(0.05, max(0.0, float(io.delta_time)))
         if imgui.is_key_down(imgui.Key.left_arrow):
@@ -250,15 +255,14 @@ class PreviewApp:
         if imgui.is_key_down(imgui.Key.right_arrow):
             self._rotate(self.rotation_rate * dt)
 
-        toggle_size = 22.0
-        toggle_min = imgui.ImVec2(canvas_max.x - toggle_size - 10.0, canvas_min.y + 10.0)
-        toggle_max = imgui.ImVec2(toggle_min.x + toggle_size, toggle_min.y + toggle_size)
-        draw.add_rect_filled(toggle_min, toggle_max, _u32(255, 255, 255) if self.bg_dark else _u32(0, 0, 0))
-        draw.add_rect(toggle_min, toggle_max, _u32(180, 180, 180))
-        imgui.set_cursor_screen_pos(toggle_min)
-        imgui.invisible_button("bg_toggle", imgui.ImVec2(toggle_size, toggle_size))
-        if imgui.is_item_clicked():
+        rail_x = canvas_max.x + rail_gap
+        rail_y = canvas_min.y
+        if self._background_button(imgui.ImVec2(rail_x, rail_y), imgui.ImVec2(rail_w, rail_w)):
             self.bg_dark = not self.bg_dark
+        if self._held_button("+", imgui.ImVec2(rail_x, rail_y + rail_w + 20.0), imgui.ImVec2(rail_w, rail_w)):
+            self._adjust_layer_offset(self.offset_rate * dt)
+        if self._held_button("-", imgui.ImVec2(rail_x, rail_y + (rail_w + 20.0) * 2.0), imgui.ImVec2(rail_w, rail_w)):
+            self._adjust_layer_offset(-self.offset_rate * dt)
 
         button_y = canvas_max.y + 18.0
         if self._held_button("<", imgui.ImVec2(canvas_min.x, button_y), imgui.ImVec2(64, 34)):
@@ -284,14 +288,24 @@ class PreviewApp:
         imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + panel_w - 1, origin.y + panel_h - 1))
         imgui.dummy(imgui.ImVec2(1, 1))
 
-    def _click_button(self, label: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
-        imgui.set_cursor_screen_pos(pos)
-        return imgui.button(label, size)
-
     def _held_button(self, label: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
         imgui.set_cursor_screen_pos(pos)
         imgui.button(label, size)
         return imgui.is_item_active()
+
+    def _background_button(self, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        imgui.set_cursor_screen_pos(pos)
+        clicked = imgui.button("##bg_toggle", size)
+        draw = imgui.get_window_draw_list()
+        fill = _u32(255, 255, 255) if self.bg_dark else _u32(0, 0, 0)
+        inset = 10.0
+        draw.add_rect_filled(
+            imgui.ImVec2(pos.x + inset, pos.y + inset),
+            imgui.ImVec2(pos.x + size.x - inset, pos.y + size.y - inset),
+            fill,
+        )
+        draw.add_rect(pos, imgui.ImVec2(pos.x + size.x, pos.y + size.y), _u32(180, 180, 180))
+        return clicked
 
     def _axis_button(self, axis: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
         selected = axis == self.up_axis
@@ -318,6 +332,11 @@ class PreviewApp:
             return
         self.angle += delta
 
+    def _adjust_layer_offset(self, delta: float) -> None:
+        if abs(delta) <= 1.0e-8:
+            return
+        self.layer_offset += delta
+
     def _draw_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         model = self.model
         if not model.faces:
@@ -332,7 +351,10 @@ class PreviewApp:
 
         faces = []
         for face in model.faces:
-            projected = [_rotate_project(p, self.angle, self.pitch, scale, cx, cy) for p in face.corners]
+            projected = []
+            for point in face.corners:
+                px, py, pz = _rotate_project(point, self.angle, self.pitch, scale, cx, cy)
+                projected.append((px, py + pz * self.layer_offset * scale, pz))
             depth = sum(p[2] for p in projected) / 4.0
             faces.append((depth, projected, face.color))
 
@@ -356,6 +378,7 @@ class PreviewApp:
             ("Bounds", bounds),
             ("Colors", str(model.unique_colors)),
             ("Up Axis", self.up_axis),
+            ("Layer Offset", f"{self.layer_offset:.2f}"),
             ("Angle", f"{math.degrees(self.angle) % 360:.0f} deg"),
         ]
         y = pos.y
