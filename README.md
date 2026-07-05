@@ -28,6 +28,24 @@ python -m pip install pillow
 
 ## Blender Add-On Usage
 
+Build the installable package:
+
+```bash
+python build_voxelator_addon.py
+```
+
+Build and refresh the Blender add-on install:
+
+```bash
+python build_voxelator_addon.py --install
+```
+
+To verify through Blender after installing:
+
+```bash
+python build_voxelator_addon.py --install --verify
+```
+
 1. Open Blender.
 2. Go to `Edit > Preferences > Add-ons > Install`.
 3. Select `VoxelatorAddon/Voxelator.zip`.
