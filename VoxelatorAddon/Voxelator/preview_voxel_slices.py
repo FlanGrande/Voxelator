@@ -37,6 +37,7 @@ class Model:
     image_height: int
     tile_size: int
     layers: int
+    slice_cells: dict[tuple[int, int, int], tuple[int, int, int, int]]
     cells: dict[tuple[int, int, int], tuple[int, int, int, int]]
     faces: list[Face]
     unique_colors: int
@@ -79,10 +80,8 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
     height, width = arr.shape[:2]
     tile, layers = _infer_static_layout(width, height, tile_size_arg)
 
-    cells: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
+    slice_cells: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
     colors = set()
-    xs: list[int] = []
-    ys: list[int] = []
     zs: list[int] = []
 
     for iz in range(layers):
@@ -95,17 +94,12 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
             x = int(col)
             rgba_np = tile_px[row, col]
             color = (int(rgba_np[0]), int(rgba_np[1]), int(rgba_np[2]), int(rgba_np[3]))
-            cell = (x, y, iz)
-            cells[cell] = color
+            slice_cells[(x, y, iz)] = color
             colors.add(color[:3])
-            xs.append(x)
-            ys.append(y)
             zs.append(iz)
 
-    bounds = None
-    if cells:
-        bounds = (max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, max(zs) - min(zs) + 1)
-
+    cells = _orient_cells(slice_cells, "+Z")
+    bounds = _bounds_for_cells(cells)
     faces = _build_faces(cells, tile, layers)
     return Model(
         path=path,
@@ -113,6 +107,7 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
         image_height=height,
         tile_size=tile,
         layers=layers,
+        slice_cells=slice_cells,
         cells=cells,
         faces=faces,
         unique_colors=len(colors),
@@ -120,6 +115,29 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
         bounds=bounds,
         file_size=path.stat().st_size,
     )
+
+
+def _orient_cells(cells: dict[tuple[int, int, int], tuple[int, int, int, int]], up_axis: str) -> dict[tuple[int, int, int], tuple[int, int, int, int]]:
+    if up_axis == "+X":
+        return {(y, x, z): color for (x, y, z), color in cells.items()}
+    if up_axis == "-X":
+        return {(y, -x, z): color for (x, y, z), color in cells.items()}
+    if up_axis == "+Y":
+        return dict(cells)
+    if up_axis == "-Y":
+        return {(x, -y, z): color for (x, y, z), color in cells.items()}
+    if up_axis == "-Z":
+        return {(x, -z, y): color for (x, y, z), color in cells.items()}
+    return {(x, z, y): color for (x, y, z), color in cells.items()}
+
+
+def _bounds_for_cells(cells: dict[tuple[int, int, int], tuple[int, int, int, int]]) -> tuple[int, int, int] | None:
+    if not cells:
+        return None
+    xs = [cell[0] for cell in cells]
+    ys = [cell[1] for cell in cells]
+    zs = [cell[2] for cell in cells]
+    return (max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, max(zs) - min(zs) + 1)
 
 
 def _build_faces(cells: dict[tuple[int, int, int], tuple[int, int, int, int]], tile: int, layers: int) -> list[Face]:
@@ -167,13 +185,15 @@ class PreviewApp:
         self.model = model
         self.angle = 0.0
         self.bg_dark = True
-        self.pitch = math.radians(18.0)
+        self.pitch = 0.0
+        self.up_axis = "+Z"
+        self.rotation_rate = math.radians(135.0)
         self.preview_size = min(640, max(320, model.tile_size * 7))
 
     def run(self) -> None:
         params = hello_imgui.RunnerParams()
         params.app_window_params.window_title = f"Voxelator Preview - {self.model.path.name}"
-        params.app_window_params.window_geometry.size = (self.preview_size + 56, self.preview_size + 300)
+        params.app_window_params.window_geometry.size = (self.preview_size + 56, self.preview_size + 440)
         params.app_window_params.resizable = False
         params.imgui_window_params.show_menu_bar = False
         params.imgui_window_params.show_status_bar = False
@@ -202,7 +222,7 @@ class PreviewApp:
         origin = imgui.get_cursor_screen_pos()
         margin = 24.0
         panel_w = self.preview_size + margin * 2
-        panel_h = self.preview_size + 250.0
+        panel_h = self.preview_size + 390.0
         panel_bg = _u32(0, 0, 0) if self.bg_dark else _u32(255, 255, 255)
         text_col = _u32(235, 235, 235) if self.bg_dark else _u32(20, 20, 20)
         muted_col = _u32(165, 165, 165) if self.bg_dark else _u32(80, 80, 80)
@@ -220,14 +240,15 @@ class PreviewApp:
         imgui.invisible_button("preview_canvas", imgui.ImVec2(self.preview_size, self.preview_size))
         if imgui.is_item_hovered():
             if abs(io.mouse_wheel) > 0.001:
-                self.angle += io.mouse_wheel * 0.12
+                self._rotate(io.mouse_wheel * 0.12)
             if imgui.is_mouse_dragging(imgui.MouseButton_.left, 0.0):
-                self.angle += io.mouse_delta.x * 0.012
+                self._rotate(io.mouse_delta.x * 0.012)
 
-        if imgui.is_key_pressed(imgui.Key.left_arrow):
-            self.angle -= 0.18
-        if imgui.is_key_pressed(imgui.Key.right_arrow):
-            self.angle += 0.18
+        dt = min(0.05, max(0.0, float(io.delta_time)))
+        if imgui.is_key_down(imgui.Key.left_arrow):
+            self._rotate(-self.rotation_rate * dt)
+        if imgui.is_key_down(imgui.Key.right_arrow):
+            self._rotate(self.rotation_rate * dt)
 
         toggle_size = 22.0
         toggle_min = imgui.ImVec2(canvas_max.x - toggle_size - 10.0, canvas_min.y + 10.0)
@@ -240,18 +261,62 @@ class PreviewApp:
             self.bg_dark = not self.bg_dark
 
         button_y = canvas_max.y + 18.0
-        imgui.set_cursor_screen_pos(imgui.ImVec2(canvas_min.x, button_y))
-        if imgui.button("<", imgui.ImVec2(92, 34)):
-            self.angle -= math.pi / 8
-        imgui.set_cursor_screen_pos(imgui.ImVec2(canvas_max.x - 92, button_y))
-        if imgui.button(">", imgui.ImVec2(92, 34)):
-            self.angle += math.pi / 8
+        if self._held_button("<", imgui.ImVec2(canvas_min.x, button_y), imgui.ImVec2(64, 34)):
+            self._rotate(-self.rotation_rate * dt)
 
-        stats_y = button_y + 52.0
+        if self._held_button(">", imgui.ImVec2(canvas_max.x - 64, button_y), imgui.ImVec2(64, 34)):
+            self._rotate(self.rotation_rate * dt)
+
+        up_y = button_y + 46.0
+        up_w = 38.0
+        up_gap = 7.0
+        up_labels = ("-X", "+X", "-Y", "+Y", "-Z", "+Z")
+        up_total = up_w * len(up_labels) + up_gap * (len(up_labels) - 1)
+        up_x = canvas_min.x + (self.preview_size - up_total) * 0.5
+        for i, axis in enumerate(up_labels):
+            pos = imgui.ImVec2(up_x + i * (up_w + up_gap), up_y)
+            if self._axis_button(axis, pos, imgui.ImVec2(up_w, 34)):
+                self._set_up_axis(axis)
+
+        stats_y = up_y + 52.0
         self._draw_stats(draw, imgui.ImVec2(canvas_min.x, stats_y), text_col, muted_col)
 
         imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + panel_w - 1, origin.y + panel_h - 1))
         imgui.dummy(imgui.ImVec2(1, 1))
+
+    def _click_button(self, label: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        imgui.set_cursor_screen_pos(pos)
+        return imgui.button(label, size)
+
+    def _held_button(self, label: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        imgui.set_cursor_screen_pos(pos)
+        imgui.button(label, size)
+        return imgui.is_item_active()
+
+    def _axis_button(self, axis: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        selected = axis == self.up_axis
+        if selected:
+            imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.48, 0.48, 0.48, 1.0))
+            imgui.push_style_color(imgui.Col_.button_hovered, imgui.ImVec4(0.58, 0.58, 0.58, 1.0))
+            imgui.push_style_color(imgui.Col_.button_active, imgui.ImVec4(0.70, 0.70, 0.70, 1.0))
+        imgui.set_cursor_screen_pos(pos)
+        clicked = imgui.button(axis, size)
+        if selected:
+            imgui.pop_style_color(3)
+        return clicked
+
+    def _set_up_axis(self, up_axis: str) -> None:
+        self.up_axis = up_axis
+        self.model.cells = _orient_cells(self.model.slice_cells, up_axis)
+        self.model.bounds = _bounds_for_cells(self.model.cells)
+        self.model.faces = _build_faces(self.model.cells, self.model.tile_size, self.model.layers)
+        self.angle = 0.0
+        self.pitch = 0.0
+
+    def _rotate(self, delta: float) -> None:
+        if abs(delta) <= 1.0e-8:
+            return
+        self.angle += delta
 
     def _draw_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         model = self.model
@@ -290,13 +355,14 @@ class PreviewApp:
             ("Non-empty", str(model.non_empty_layers)),
             ("Bounds", bounds),
             ("Colors", str(model.unique_colors)),
+            ("Up Axis", self.up_axis),
             ("Angle", f"{math.degrees(self.angle) % 360:.0f} deg"),
         ]
         y = pos.y
         for key, value in lines:
             draw.add_text(imgui.ImVec2(pos.x, y), muted_col, f"{key}")
             draw.add_text(imgui.ImVec2(pos.x + 102.0, y), text_col, value)
-            y += 20.0
+            y += 18.0
 
 
 def main() -> None:
