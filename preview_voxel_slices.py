@@ -183,13 +183,14 @@ def _rotate_project(point: tuple[float, float, float], angle: float, pitch: floa
 class PreviewApp:
     def __init__(self, model: Model):
         self.model = model
+        self.render_mode = "Stacked Sprite"
         self.angle = 0.0
         self.bg_dark = True
         self.pitch = 0.0
         self.up_axis = "+Z"
-        self.layer_offset = 0.0
+        self.layer_offset = 1.0
         self.rotation_rate = math.radians(135.0)
-        self.offset_rate = 1.0
+        self.offset_rate = 3.0
         self.preview_size = min(640, max(320, model.tile_size * 7))
 
     def run(self) -> None:
@@ -240,6 +241,10 @@ class PreviewApp:
 
         self._draw_model(draw, canvas_min, canvas_max)
 
+        mode_pos = imgui.ImVec2(canvas_min.x, origin.y + 6.0)
+        if self._mode_button(mode_pos, imgui.ImVec2(30, 30)):
+            self._toggle_mode()
+
         imgui.set_cursor_screen_pos(canvas_min)
         imgui.invisible_button("preview_canvas", imgui.ImVec2(self.preview_size, self.preview_size))
         if imgui.is_item_hovered():
@@ -271,18 +276,19 @@ class PreviewApp:
         if self._held_button(">", imgui.ImVec2(canvas_max.x - 64, button_y), imgui.ImVec2(64, 34)):
             self._rotate(self.rotation_rate * dt)
 
-        up_y = button_y + 46.0
-        up_w = 38.0
-        up_gap = 7.0
-        up_labels = ("-X", "+X", "-Y", "+Y", "-Z", "+Z")
-        up_total = up_w * len(up_labels) + up_gap * (len(up_labels) - 1)
-        up_x = canvas_min.x + (self.preview_size - up_total) * 0.5
-        for i, axis in enumerate(up_labels):
-            pos = imgui.ImVec2(up_x + i * (up_w + up_gap), up_y)
-            if self._axis_button(axis, pos, imgui.ImVec2(up_w, 34)):
-                self._set_up_axis(axis)
-
-        stats_y = up_y + 52.0
+        stats_y = button_y + 52.0
+        if self.render_mode == "Voxel":
+            up_y = button_y + 46.0
+            up_w = 38.0
+            up_gap = 7.0
+            up_labels = ("-X", "+X", "-Y", "+Y", "-Z", "+Z")
+            up_total = up_w * len(up_labels) + up_gap * (len(up_labels) - 1)
+            up_x = canvas_min.x + (self.preview_size - up_total) * 0.5
+            for i, axis in enumerate(up_labels):
+                pos = imgui.ImVec2(up_x + i * (up_w + up_gap), up_y)
+                if self._axis_button(axis, pos, imgui.ImVec2(up_w, 34)):
+                    self._set_up_axis(axis)
+            stats_y = up_y + 52.0
         self._draw_stats(draw, imgui.ImVec2(canvas_min.x, stats_y), text_col, muted_col)
 
         imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + panel_w - 1, origin.y + panel_h - 1))
@@ -307,6 +313,40 @@ class PreviewApp:
         draw.add_rect(pos, imgui.ImVec2(pos.x + size.x, pos.y + size.y), _u32(180, 180, 180))
         return clicked
 
+    def _mode_button(self, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        imgui.set_cursor_screen_pos(pos)
+        clicked = imgui.button("##mode_toggle", size)
+        draw = imgui.get_window_draw_list()
+        col = _u32(230, 230, 230) if self.bg_dark else _u32(20, 20, 20)
+        if self.render_mode == "Voxel":
+            a = imgui.ImVec2(pos.x + 8.0, pos.y + 11.0)
+            b = imgui.ImVec2(pos.x + 17.0, pos.y + 6.0)
+            c = imgui.ImVec2(pos.x + 24.0, pos.y + 12.0)
+            d = imgui.ImVec2(pos.x + 24.0, pos.y + 22.0)
+            e = imgui.ImVec2(pos.x + 15.0, pos.y + 26.0)
+            f = imgui.ImVec2(pos.x + 8.0, pos.y + 20.0)
+            draw.add_line(a, b, col, 1.5)
+            draw.add_line(b, c, col, 1.5)
+            draw.add_line(c, d, col, 1.5)
+            draw.add_line(d, e, col, 1.5)
+            draw.add_line(e, f, col, 1.5)
+            draw.add_line(f, a, col, 1.5)
+            draw.add_line(a, c, col, 1.5)
+            draw.add_line(b, e, col, 1.5)
+            draw.add_line(f, d, col, 1.5)
+        else:
+            for i in range(3):
+                off = i * 4.0
+                draw.add_rect(
+                    imgui.ImVec2(pos.x + 7.0 + off, pos.y + 8.0 + off),
+                    imgui.ImVec2(pos.x + 21.0 + off, pos.y + 17.0 + off),
+                    col,
+                    0.0,
+                    0,
+                    1.5,
+                )
+        return clicked
+
     def _axis_button(self, axis: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
         selected = axis == self.up_axis
         if selected:
@@ -327,6 +367,9 @@ class PreviewApp:
         self.angle = 0.0
         self.pitch = 0.0
 
+    def _toggle_mode(self) -> None:
+        self.render_mode = "Voxel" if self.render_mode == "Stacked Sprite" else "Stacked Sprite"
+
     def _rotate(self, delta: float) -> None:
         if abs(delta) <= 1.0e-8:
             return
@@ -338,6 +381,53 @@ class PreviewApp:
         self.layer_offset += delta
 
     def _draw_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
+        if self.render_mode == "Voxel":
+            self._draw_voxel_model(draw, canvas_min, canvas_max)
+        else:
+            self._draw_stacked_sprite(draw, canvas_min, canvas_max)
+
+    def _draw_stacked_sprite(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
+        model = self.model
+        if not model.slice_cells:
+            return
+        w = canvas_max.x - canvas_min.x
+        h = canvas_max.y - canvas_min.y
+        cx = canvas_min.x + w * 0.5
+        cy = canvas_min.y + h * 0.54
+        xs = [cell[0] for cell in model.slice_cells]
+        ys = [cell[1] for cell in model.slice_cells]
+        zs = [cell[2] for cell in model.slice_cells]
+        center_x = (min(xs) + max(xs)) * 0.5
+        center_y = (min(ys) + max(ys)) * 0.5
+        center_z = (min(zs) + max(zs)) * 0.5
+        stack_span = abs((model.layers - 1) * self.layer_offset)
+        max_span = max(max(xs) - min(xs) + 1, max(ys) - min(ys) + 1 + stack_span, 1.0)
+        scale = min(w, h) * 0.72 / max_span
+        ca = math.cos(self.angle)
+        sa = math.sin(self.angle)
+
+        quads = []
+        for (x, y, z), color in sorted(model.slice_cells.items(), key=lambda item: item[0][2]):
+            layer_x = 0.0
+            layer_y = -(z - center_z) * self.layer_offset
+            corners = []
+            for lx, ly in (
+                (x - center_x - 0.5, -(y - center_y) - 0.5),
+                (x - center_x + 0.5, -(y - center_y) - 0.5),
+                (x - center_x + 0.5, -(y - center_y) + 0.5),
+                (x - center_x - 0.5, -(y - center_y) + 0.5),
+            ):
+                rx = ca * lx - sa * ly
+                ry = sa * lx + ca * ly
+                corners.append((cx + (rx + layer_x) * scale, cy + (ry + layer_y) * scale))
+            quads.append((z, corners, color))
+
+        for _z, pts, color in quads:
+            col = _u32(*color)
+            p = [imgui.ImVec2(pts[i][0], pts[i][1]) for i in range(4)]
+            draw.add_quad_filled(p[0], p[1], p[2], p[3], col)
+
+    def _draw_voxel_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         model = self.model
         if not model.faces:
             return
@@ -350,11 +440,12 @@ class PreviewApp:
         scale = min(w, h) * 0.72 / max_span
 
         faces = []
+        voxel_offset = self.layer_offset - 1.0
         for face in model.faces:
             projected = []
             for point in face.corners:
                 px, py, pz = _rotate_project(point, self.angle, self.pitch, scale, cx, cy)
-                projected.append((px, py + pz * self.layer_offset * scale, pz))
+                projected.append((px, py + pz * voxel_offset * scale, pz))
             depth = sum(p[2] for p in projected) / 4.0
             faces.append((depth, projected, face.color))
 
@@ -365,22 +456,26 @@ class PreviewApp:
 
     def _draw_stats(self, draw, pos: imgui.ImVec2, text_col: int, muted_col: int) -> None:
         model = self.model
-        occupancy = (len(model.cells) / max(1, model.tile_size * model.tile_size * model.layers)) * 100.0
-        bounds = "x".join(str(v) for v in model.bounds) if model.bounds else "empty"
+        active_cells = model.cells if self.render_mode == "Voxel" else model.slice_cells
+        active_bounds = model.bounds if self.render_mode == "Voxel" else _bounds_for_cells(_orient_cells(model.slice_cells, "+Z"))
+        occupancy = (len(active_cells) / max(1, model.tile_size * model.tile_size * model.layers)) * 100.0
+        bounds = "x".join(str(v) for v in active_bounds) if active_bounds else "empty"
         lines = [
             ("Name", model.path.name),
             ("File", _format_bytes(model.file_size)),
             ("PNG", f"{model.image_width}x{model.image_height}"),
             ("Resolution", str(model.tile_size)),
             ("Layers", str(model.layers)),
-            ("Voxels", f"{len(model.cells)} ({occupancy:.1f}%)"),
+            ("Cells", f"{len(active_cells)} ({occupancy:.1f}%)"),
             ("Non-empty", str(model.non_empty_layers)),
             ("Bounds", bounds),
             ("Colors", str(model.unique_colors)),
-            ("Up Axis", self.up_axis),
+            ("Mode", self.render_mode),
             ("Layer Offset", f"{self.layer_offset:.2f}"),
             ("Angle", f"{math.degrees(self.angle) % 360:.0f} deg"),
         ]
+        if self.render_mode == "Voxel":
+            lines.insert(-2, ("Up Axis", self.up_axis))
         y = pos.y
         for key, value in lines:
             draw.add_text(imgui.ImVec2(pos.x, y), muted_col, f"{key}")

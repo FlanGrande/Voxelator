@@ -85,7 +85,7 @@ The surface voxelization loop is implemented in C (`voxelize_native.c`). On firs
 
 ### Preview Window
 
-`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG, shows file stats, defaults to `+Z` as the up direction, provides `-X`, `+X`, `-Y`, `+Y`, `-Z`, and `+Z` up-axis buttons, rotates continuously while holding the left/right buttons or keyboard arrows, supports mouse wheel and left-click drag rotation, adjusts layer offset with vertical drag or the right-side `+`/`-` buttons, and has a right-side black/white background toggle.
+`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG and defaults to `Stacked Sprite` mode, which draws the original PNG slices as separate cards. The top-left icon-only button switches to `Voxel` mode, which reconstructs a voxel surface and shows `-X`, `+X`, `-Y`, `+Y`, `-Z`, and `+Z` up-axis buttons. Both modes rotate while holding the left/right buttons or keyboard arrows, support mouse wheel and left-click drag rotation, adjust layer offset with vertical drag or the right-side `+`/`-` buttons, and have a right-side black/white background toggle.
 
 ## Output Format
 
