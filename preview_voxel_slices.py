@@ -1,229 +1,313 @@
 #!/usr/bin/env python3
-"""Preview a Voxelator stacked PNG as a rotatable voxel mesh in Blender."""
+"""Tiny ImGui viewer for Voxelator static stacked PNG spritesheets."""
 
 from __future__ import annotations
 
 import argparse
-import os
-import sys
+import math
+from dataclasses import dataclass
+from pathlib import Path
 
-import bpy
-from mathutils import Vector
-
-
-def _script_args(argv):
-    if "--" in argv:
-        return argv[argv.index("--") + 1 :]
-    return []
+import numpy as np
+from PIL import Image
+from imgui_bundle import imgui, hello_imgui, immapp
 
 
-def _clear_scene():
-    bpy.ops.object.select_all(action="SELECT")
-    bpy.ops.object.delete()
+FACE_DEFS = (
+    ((1, 0, 0), ((1, -1, -1), (1, -1, 1), (1, 1, 1), (1, 1, -1))),
+    ((-1, 0, 0), ((-1, -1, -1), (-1, 1, -1), (-1, 1, 1), (-1, -1, 1))),
+    ((0, 1, 0), ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1))),
+    ((0, -1, 0), ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1))),
+    ((0, 0, 1), ((-1, -1, 1), (-1, 1, 1), (1, 1, 1), (1, -1, 1))),
+    ((0, 0, -1), ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1))),
+)
 
 
-def _load_pixels(path):
-    image = bpy.data.images.load(path, check_existing=True)
-    width, height = image.size
-    pixels = list(image.pixels[:])
-    return image, int(width), int(height), pixels
+@dataclass(frozen=True)
+class Face:
+    normal: tuple[int, int, int]
+    corners: tuple[tuple[float, float, float], ...]
+    color: tuple[int, int, int, int]
 
 
-def _rgba_at(pixels, width, height, x, y):
-    idx = ((height - 1 - y) * width + x) * 4
-    return (
-        float(pixels[idx]),
-        float(pixels[idx + 1]),
-        float(pixels[idx + 2]),
-        float(pixels[idx + 3]),
-    )
+@dataclass
+class Model:
+    path: Path
+    image_width: int
+    image_height: int
+    tile_size: int
+    layers: int
+    cells: dict[tuple[int, int, int], tuple[int, int, int, int]]
+    faces: list[Face]
+    unique_colors: int
+    non_empty_layers: int
+    bounds: tuple[int, int, int] | None
+    file_size: int
 
 
-def _cells_from_stacked_png(pixels, width, height, dx, dy, dz, tile_size, alpha_threshold):
-    tile = max(1, int(tile_size))
-    off_x = (tile - dx) // 2
-    off_y = (tile - dy) // 2
-    cells = {}
-    for iz in range(dz):
+def _u32(r: int, g: int, b: int, a: int = 255) -> int:
+    return imgui.get_color_u32(imgui.ImVec4(r / 255, g / 255, b / 255, a / 255))
+
+
+def _format_bytes(size: int) -> str:
+    units = ("B", "KB", "MB", "GB")
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{size} B"
+
+
+def _infer_static_layout(width: int, height: int, tile_size_arg: int | None) -> tuple[int, int]:
+    tile = int(tile_size_arg) if tile_size_arg else int(height)
+    if tile <= 0:
+        raise ValueError("Tile size must be positive")
+    if height != tile:
+        raise ValueError(
+            f"Expected static Voxelator PNG height to equal tile size ({tile}), got height={height}. "
+            "Animation spritesheets are not supported by this preview."
+        )
+    if width % tile != 0:
+        raise ValueError(f"Image width {width} is not divisible by tile size {tile}")
+    return tile, width // tile
+
+
+def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: int = 1) -> Model:
+    img = Image.open(path).convert("RGBA")
+    arr = np.asarray(img, dtype=np.uint8)
+    height, width = arr.shape[:2]
+    tile, layers = _infer_static_layout(width, height, tile_size_arg)
+
+    cells: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
+    colors = set()
+    xs: list[int] = []
+    ys: list[int] = []
+    zs: list[int] = []
+
+    for iz in range(layers):
         x0 = iz * tile
-        for ix in range(dx):
-            px = x0 + off_x + ix
-            if px < 0 or px >= width:
-                continue
-            for iy in range(dy):
-                py = off_y + iy
-                if py < 0 or py >= height:
-                    continue
-                color = _rgba_at(pixels, width, height, px, py)
-                if color[3] > alpha_threshold:
-                    cells[(ix, iy, iz)] = color
-    return cells
+        tile_px = arr[:, x0 : x0 + tile, :]
+        alpha = tile_px[:, :, 3]
+        coords = np.argwhere(alpha > alpha_threshold)
+        for row, col in coords:
+            y = tile - 1 - int(row)
+            x = int(col)
+            rgba_np = tile_px[row, col]
+            color = (int(rgba_np[0]), int(rgba_np[1]), int(rgba_np[2]), int(rgba_np[3]))
+            cell = (x, y, iz)
+            cells[cell] = color
+            colors.add(color[:3])
+            xs.append(x)
+            ys.append(y)
+            zs.append(iz)
 
+    bounds = None
+    if cells:
+        bounds = (max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, max(zs) - min(zs) + 1)
 
-def _build_voxel_mesh_data(cells, dx, dy, dz):
-    face_defs = (
-        ((1, 0, 0), ((1, -1, -1), (1, -1, 1), (1, 1, 1), (1, 1, -1))),
-        ((-1, 0, 0), ((-1, -1, -1), (-1, 1, -1), (-1, 1, 1), (-1, -1, 1))),
-        ((0, 1, 0), ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1))),
-        ((0, -1, 0), ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1))),
-        ((0, 0, 1), ((-1, -1, 1), (-1, 1, 1), (1, 1, 1), (1, -1, 1))),
-        ((0, 0, -1), ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1))),
+    faces = _build_faces(cells, tile, layers)
+    return Model(
+        path=path,
+        image_width=width,
+        image_height=height,
+        tile_size=tile,
+        layers=layers,
+        cells=cells,
+        faces=faces,
+        unique_colors=len(colors),
+        non_empty_layers=len(set(zs)),
+        bounds=bounds,
+        file_size=path.stat().st_size,
     )
 
-    occupied = set(cells)
-    verts = []
-    faces = []
-    face_cells = []
-    vert_map = {}
-    half = 0.5
-    ox = -((dx - 1) * 0.5)
-    oy = -((dy - 1) * 0.5)
-    oz = -((dz - 1) * 0.5)
 
+def _build_faces(cells: dict[tuple[int, int, int], tuple[int, int, int, int]], tile: int, layers: int) -> list[Face]:
+    occupied = set(cells)
+    if not occupied:
+        return []
+    xs = [cell[0] for cell in occupied]
+    ys = [cell[1] for cell in occupied]
+    zs = [cell[2] for cell in occupied]
+    cx = (min(xs) + max(xs)) * 0.5
+    cy = (min(ys) + max(ys)) * 0.5
+    cz = (min(zs) + max(zs)) * 0.5
+
+    faces: list[Face] = []
     for cell in sorted(occupied):
         ix, iy, iz = cell
-        for normal, corners in face_defs:
+        color = cells[cell]
+        for normal, corners in FACE_DEFS:
             nx, ny, nz = normal
             if (ix + nx, iy + ny, iz + nz) in occupied:
                 continue
-
-            face = []
-            for sx, sy, sz in corners:
-                lx = 2 * ix + sx
-                ly = 2 * iy + sy
-                lz = 2 * iz + sz
-                key = (lx, ly, lz)
-                vi = vert_map.get(key)
-                if vi is None:
-                    vi = len(verts)
-                    verts.append((ox + lx * half, oy + ly * half, oz + lz * half))
-                    vert_map[key] = vi
-                face.append(vi)
-            faces.append(face)
-            face_cells.append(cell)
-
-    return verts, faces, face_cells
+            pts = tuple(
+                ((ix - cx) + sx * 0.5, (iy - cy) + sy * 0.5, (iz - cz) + sz * 0.5)
+                for sx, sy, sz in corners
+            )
+            faces.append(Face(normal=normal, corners=pts, color=color))
+    return faces
 
 
-def _make_color_material():
-    mat = bpy.data.materials.new("VoxelatorPreview_VoxelColor")
-    mat.diffuse_color = (1.0, 1.0, 1.0, 1.0)
-    mat.use_nodes = True
-    nodes = mat.node_tree.nodes
-    bsdf = next((node for node in nodes if node.type == "BSDF_PRINCIPLED"), None)
-    if bsdf:
-        attr = nodes.new(type="ShaderNodeAttribute")
-        attr.attribute_name = "VoxelColor"
-        if "Color" in attr.outputs and "Base Color" in bsdf.inputs:
-            mat.node_tree.links.new(attr.outputs["Color"], bsdf.inputs["Base Color"])
-        if "Alpha" in attr.outputs and "Alpha" in bsdf.inputs:
-            mat.node_tree.links.new(attr.outputs["Alpha"], bsdf.inputs["Alpha"])
-            mat.blend_method = "BLEND"
-    return mat
+def _rotate_project(point: tuple[float, float, float], angle: float, pitch: float, scale: float, cx: float, cy: float) -> tuple[float, float, float]:
+    x, y, z = point
+    ca = math.cos(angle)
+    sa = math.sin(angle)
+    xr = ca * x + sa * z
+    zr = -sa * x + ca * z
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    yp = cp * y - sp * zr
+    zp = sp * y + cp * zr
+    return (cx + xr * scale, cy - yp * scale, zp)
 
 
-def _apply_colors(obj, face_cells, cells):
-    mesh = obj.data
-    color_attr = mesh.color_attributes.new(name="VoxelColor", type="BYTE_COLOR", domain="CORNER")
-    flat = [1.0] * (len(mesh.loops) * 4)
-    loop_starts = [0] * len(mesh.polygons)
-    loop_totals = [0] * len(mesh.polygons)
-    mesh.polygons.foreach_get("loop_start", loop_starts)
-    mesh.polygons.foreach_get("loop_total", loop_totals)
-    for pi, cell in enumerate(face_cells):
-        color = cells.get(cell, (1.0, 1.0, 1.0, 1.0))
-        for li in range(loop_starts[pi], loop_starts[pi] + loop_totals[pi]):
-            base = li * 4
-            flat[base] = color[0]
-            flat[base + 1] = color[1]
-            flat[base + 2] = color[2]
-            flat[base + 3] = color[3]
-    color_attr.data.foreach_set("color", flat)
-    mesh.materials.append(_make_color_material())
-    mesh.update()
+class PreviewApp:
+    def __init__(self, model: Model):
+        self.model = model
+        self.angle = 0.0
+        self.bg_dark = True
+        self.pitch = math.radians(18.0)
+        self.preview_size = min(640, max(320, model.tile_size * 7))
+
+    def run(self) -> None:
+        params = hello_imgui.RunnerParams()
+        params.app_window_params.window_title = f"Voxelator Preview - {self.model.path.name}"
+        params.app_window_params.window_geometry.size = (self.preview_size + 56, self.preview_size + 300)
+        params.app_window_params.resizable = False
+        params.imgui_window_params.show_menu_bar = False
+        params.imgui_window_params.show_status_bar = False
+        params.imgui_window_params.default_imgui_window_type = hello_imgui.DefaultImGuiWindowType.provide_full_screen_window
+        params.callbacks.setup_imgui_style = self._setup_style
+        params.callbacks.show_gui = self._gui
+        immapp.run(params)
+
+    def _setup_style(self) -> None:
+        style = imgui.get_style()
+        style.window_rounding = 0.0
+        style.frame_rounding = 0.0
+        style.window_border_size = 0.0
+        style.frame_border_size = 0.0
+        style.item_spacing = imgui.ImVec2(8, 8)
+        colors = imgui.Col_
+        style.set_color_(colors.text, imgui.ImVec4(0.92, 0.92, 0.92, 1.0))
+        style.set_color_(colors.window_bg, imgui.ImVec4(0.0, 0.0, 0.0, 1.0))
+        style.set_color_(colors.button, imgui.ImVec4(0.12, 0.12, 0.12, 1.0))
+        style.set_color_(colors.button_hovered, imgui.ImVec4(0.24, 0.24, 0.24, 1.0))
+        style.set_color_(colors.button_active, imgui.ImVec4(0.35, 0.35, 0.35, 1.0))
+
+    def _gui(self) -> None:
+        io = imgui.get_io()
+        draw = imgui.get_window_draw_list()
+        origin = imgui.get_cursor_screen_pos()
+        margin = 24.0
+        panel_w = self.preview_size + margin * 2
+        panel_h = self.preview_size + 250.0
+        panel_bg = _u32(0, 0, 0) if self.bg_dark else _u32(255, 255, 255)
+        text_col = _u32(235, 235, 235) if self.bg_dark else _u32(20, 20, 20)
+        muted_col = _u32(165, 165, 165) if self.bg_dark else _u32(80, 80, 80)
+
+        draw.add_rect_filled(origin, imgui.ImVec2(origin.x + panel_w, origin.y + panel_h), panel_bg)
+
+        canvas_min = imgui.ImVec2(origin.x + margin, origin.y + margin + 22.0)
+        canvas_max = imgui.ImVec2(canvas_min.x + self.preview_size, canvas_min.y + self.preview_size)
+        canvas_bg = _u32(8, 8, 8) if self.bg_dark else _u32(245, 245, 245)
+        draw.add_rect_filled(canvas_min, canvas_max, canvas_bg)
+
+        self._draw_model(draw, canvas_min, canvas_max)
+
+        imgui.set_cursor_screen_pos(canvas_min)
+        imgui.invisible_button("preview_canvas", imgui.ImVec2(self.preview_size, self.preview_size))
+        if imgui.is_item_hovered():
+            if abs(io.mouse_wheel) > 0.001:
+                self.angle += io.mouse_wheel * 0.12
+            if imgui.is_mouse_dragging(imgui.MouseButton_.left, 0.0):
+                self.angle += io.mouse_delta.x * 0.012
+
+        if imgui.is_key_pressed(imgui.Key.left_arrow):
+            self.angle -= 0.18
+        if imgui.is_key_pressed(imgui.Key.right_arrow):
+            self.angle += 0.18
+
+        toggle_size = 22.0
+        toggle_min = imgui.ImVec2(canvas_max.x - toggle_size - 10.0, canvas_min.y + 10.0)
+        toggle_max = imgui.ImVec2(toggle_min.x + toggle_size, toggle_min.y + toggle_size)
+        draw.add_rect_filled(toggle_min, toggle_max, _u32(255, 255, 255) if self.bg_dark else _u32(0, 0, 0))
+        draw.add_rect(toggle_min, toggle_max, _u32(180, 180, 180))
+        imgui.set_cursor_screen_pos(toggle_min)
+        imgui.invisible_button("bg_toggle", imgui.ImVec2(toggle_size, toggle_size))
+        if imgui.is_item_clicked():
+            self.bg_dark = not self.bg_dark
+
+        button_y = canvas_max.y + 18.0
+        imgui.set_cursor_screen_pos(imgui.ImVec2(canvas_min.x, button_y))
+        if imgui.button("<", imgui.ImVec2(92, 34)):
+            self.angle -= math.pi / 8
+        imgui.set_cursor_screen_pos(imgui.ImVec2(canvas_max.x - 92, button_y))
+        if imgui.button(">", imgui.ImVec2(92, 34)):
+            self.angle += math.pi / 8
+
+        stats_y = button_y + 52.0
+        self._draw_stats(draw, imgui.ImVec2(canvas_min.x, stats_y), text_col, muted_col)
+
+        imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + panel_w - 1, origin.y + panel_h - 1))
+        imgui.dummy(imgui.ImVec2(1, 1))
+
+    def _draw_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
+        model = self.model
+        if not model.faces:
+            return
+        w = canvas_max.x - canvas_min.x
+        h = canvas_max.y - canvas_min.y
+        cx = canvas_min.x + w * 0.5
+        cy = canvas_min.y + h * 0.54
+        bounds = model.bounds or (model.tile_size, model.tile_size, model.layers)
+        max_span = max(bounds[0], bounds[1], bounds[2], 1)
+        scale = min(w, h) * 0.72 / max_span
+
+        faces = []
+        for face in model.faces:
+            projected = [_rotate_project(p, self.angle, self.pitch, scale, cx, cy) for p in face.corners]
+            depth = sum(p[2] for p in projected) / 4.0
+            faces.append((depth, projected, face.color))
+
+        for _depth, pts, color in sorted(faces, key=lambda item: item[0]):
+            col = _u32(*color)
+            p = [imgui.ImVec2(pts[i][0], pts[i][1]) for i in range(4)]
+            draw.add_quad_filled(p[0], p[1], p[2], p[3], col)
+
+    def _draw_stats(self, draw, pos: imgui.ImVec2, text_col: int, muted_col: int) -> None:
+        model = self.model
+        occupancy = (len(model.cells) / max(1, model.tile_size * model.tile_size * model.layers)) * 100.0
+        bounds = "x".join(str(v) for v in model.bounds) if model.bounds else "empty"
+        lines = [
+            ("Name", model.path.name),
+            ("File", _format_bytes(model.file_size)),
+            ("PNG", f"{model.image_width}x{model.image_height}"),
+            ("Resolution", str(model.tile_size)),
+            ("Layers", str(model.layers)),
+            ("Voxels", f"{len(model.cells)} ({occupancy:.1f}%)"),
+            ("Non-empty", str(model.non_empty_layers)),
+            ("Bounds", bounds),
+            ("Colors", str(model.unique_colors)),
+            ("Angle", f"{math.degrees(self.angle) % 360:.0f} deg"),
+        ]
+        y = pos.y
+        for key, value in lines:
+            draw.add_text(imgui.ImVec2(pos.x, y), muted_col, f"{key}")
+            draw.add_text(imgui.ImVec2(pos.x + 102.0, y), text_col, value)
+            y += 20.0
 
 
-def _setup_scene(obj, source_image_name):
-    bpy.ops.object.select_all(action="DESELECT")
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Preview a Voxelator static stacked PNG")
+    parser.add_argument("--png", required=True, help="Static stacked PNG produced by Voxelator")
+    parser.add_argument("--tile-size", type=int, default=0, help="Optional tile size override")
+    parser.add_argument("--alpha-threshold", type=int, default=1, help="Minimum alpha value (0-255) to count a voxel")
+    args = parser.parse_args()
 
-    max_dim = max(obj.dimensions) if obj.dimensions else 1.0
-    distance = max(8.0, max_dim * 2.2)
-    bpy.ops.object.light_add(type="AREA", location=(0.0, -distance * 0.8, distance))
-    light = bpy.context.object
-    light.name = "Voxelator Preview Light"
-    light.data.energy = 500.0
-    light.data.size = max(5.0, max_dim)
-
-    bpy.ops.object.camera_add(location=(distance, -distance, distance * 0.75), rotation=(1.1, 0.0, 0.785398))
-    cam = bpy.context.object
-    bpy.context.scene.camera = cam
-    try:
-        direction = Vector(obj.location) - Vector(cam.location)
-        cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-    except Exception:
-        pass
-
-    try:
-        bpy.context.scene.render.engine = "BLENDER_EEVEE_NEXT"
-    except Exception:
-        try:
-            bpy.context.scene.render.engine = "BLENDER_EEVEE"
-        except Exception:
-            pass
-    bpy.context.scene.view_settings.view_transform = "Standard"
-    bpy.context.scene.world.color = (0.04, 0.04, 0.04)
-
-    screen = getattr(bpy.context, "screen", None)
-    if not screen:
-        return
-    for area in screen.areas:
-        if area.type == "VIEW_3D":
-            region = next((r for r in area.regions if r.type == "WINDOW"), None)
-            if not region:
-                continue
-            override = {"area": area, "region": region, "edit_object": None, "active_object": obj, "selected_objects": [obj]}
-            with bpy.context.temp_override(**override):
-                bpy.ops.view3d.view_axis(type="FRONT", align_active=False)
-                bpy.ops.view3d.view_selected(use_all_regions=False)
-            for space in area.spaces:
-                if space.type == "VIEW_3D":
-                    space.shading.type = "MATERIAL"
-                    space.overlay.show_floor = True
-            break
-
-    bpy.context.scene.name = f"Voxelator Preview - {source_image_name}"
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Preview Voxelator stacked PNG as a rotatable mesh")
-    parser.add_argument("--png", required=True, help="Stacked PNG produced by Voxelator")
-    parser.add_argument("--dx", type=int, required=True, help="Voxel grid X cells")
-    parser.add_argument("--dy", type=int, required=True, help="Voxel grid Y cells")
-    parser.add_argument("--dz", type=int, required=True, help="Voxel grid Z slices")
-    parser.add_argument("--tile-size", type=int, required=True, help="Tile size used by spritesheet")
-    parser.add_argument("--alpha-threshold", type=float, default=0.01, help="Minimum alpha to create a voxel")
-    args = parser.parse_args(_script_args(sys.argv))
-
-    png_path = os.path.abspath(args.png)
-    if not os.path.isfile(png_path):
-        raise FileNotFoundError(png_path)
-
-    _clear_scene()
-    image, width, height, pixels = _load_pixels(png_path)
-    cells = _cells_from_stacked_png(pixels, width, height, args.dx, args.dy, args.dz, args.tile_size, args.alpha_threshold)
-    verts, faces, face_cells = _build_voxel_mesh_data(cells, args.dx, args.dy, args.dz)
-
-    mesh = bpy.data.meshes.new("Voxelator Preview Mesh")
-    mesh.from_pydata(verts, [], faces)
-    mesh.update()
-    obj = bpy.data.objects.new("Voxelator Preview", mesh)
-    bpy.context.collection.objects.link(obj)
-    _apply_colors(obj, face_cells, cells)
-    _setup_scene(obj, image.name)
-
-    print(f"Voxelator preview loaded: {png_path} voxels={len(cells)} faces={len(faces)}", flush=True)
+    model = _load_model(Path(args.png).expanduser().resolve(), args.tile_size or None, args.alpha_threshold)
+    PreviewApp(model).run()
 
 
 if __name__ == "__main__":

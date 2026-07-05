@@ -14,13 +14,19 @@ This fork also includes command-line helpers for importing `.fbx` files, exporti
 python -m pip install pillow
 ```
 
+- `See Preview` uses a separate Python process with `imgui-bundle`, Pillow, and NumPy. The add-on auto-detects a compatible Python; set `VOXELATOR_PREVIEW_PYTHON=/path/to/python` if needed.
+
+```bash
+python -m pip install imgui-bundle pillow numpy
+```
+
 - GNU `parallel` only if you use `remake_men_and_women.sh`.
 
 ## Files
 
 - `voxelator.py` - Blender add-on and voxelization operator.
 - `voxelize_native.c` - native C surface voxelizer, auto-compiled on first run.
-- `preview_voxel_slices.py` - separate Blender preview window for static stacked PNGs.
+- `preview_voxel_slices.py` - tiny ImGui preview window for static stacked PNGs.
 - `run_voxelator_fbx.py` - headless Blender runner for one `.fbx` file.
 - `run_voxelator_batch.py` - recursive batch runner for folders of `.fbx` files.
 - `make_vertical_spritesheet.py` - stacks PNG files vertically.
@@ -70,12 +76,16 @@ Install the ZIP package, not only `voxelator.py`; the native voxelizer and previ
 - `Frame Step` - samples every Nth animation frame.
 - `Slices Only` - exports PNG slices without building the voxel mesh.
 - `Slices PNG` - output path for generated PNG.
-- `See Preview` - after a static export, opens a separate Blender window that rebuilds the stacked PNG as a rotatable colored voxel mesh.
+- `See Preview` - after a static export, opens a tiny ImGui window with a smooth rotatable preview of the stacked PNG. Animation exports ignore this option.
 - `Log File` - output path for processing log.
 
 ### Native Voxelizer
 
 The surface voxelization loop is implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python voxelizer and logs the reason. Delete `libvoxelize.so` to force a rebuild.
+
+### Preview Window
+
+`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG, shows file stats, rotates with the mouse wheel, left/right arrows, keyboard arrows, or left-click drag, and has a small top-right black/white background toggle.
 
 ## Output Format
 

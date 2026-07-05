@@ -15,6 +15,7 @@ import bpy
 import ctypes
 import os
 import subprocess
+import sys
 import time
 import math
 
@@ -105,40 +106,67 @@ def _progress_range(progress, start, end, index, total, message):
         return
     progress.update(start + (end - start) * (index / total), message)
 
-def _launch_preview_process(png_path, dx, dy, dz, tile_size):
+def _preview_python_candidates():
+    seen = set()
+    env_path = os.environ.get("VOXELATOR_PREVIEW_PYTHON", "").strip()
+    candidates = [
+        env_path,
+        sys.executable,
+        "/home/Flan/_Proyectos/.pyenv/versions/3.11.11/bin/python",
+        "python3.11",
+        "python3",
+        "python",
+    ]
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        yield candidate
+
+def _find_preview_python():
+    global _PREVIEW_PYTHON, _PREVIEW_PYTHON_TRIED
+    if _PREVIEW_PYTHON_TRIED:
+        return _PREVIEW_PYTHON
+    _PREVIEW_PYTHON_TRIED = True
+    check_code = "import imgui_bundle, PIL, numpy"
+    for candidate in _preview_python_candidates():
+        try:
+            result = subprocess.run(
+                [candidate, "-c", check_code],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0:
+            _PREVIEW_PYTHON = candidate
+            return _PREVIEW_PYTHON
+    _log("[Voxelator] Preview launch skipped: no Python with imgui_bundle, PIL, and numpy found. Set VOXELATOR_PREVIEW_PYTHON to override.")
+    return None
+
+def _launch_preview_process(png_path):
     if bpy.app.background:
         return
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview_voxel_slices.py")
     if not os.path.isfile(script_path):
         _log(f"[Voxelator] Preview script not found: {script_path}")
         return
-    blender_path = bpy.app.binary_path
-    if not blender_path:
-        _log("[Voxelator] Preview launch skipped: Blender binary path unavailable")
+    preview_python = _find_preview_python()
+    if not preview_python:
         return
 
     cmd = [
-        blender_path,
-        "--factory-startup",
-        "--python",
+        preview_python,
         script_path,
-        "--",
         "--png",
         png_path,
-        "--dx",
-        str(int(dx)),
-        "--dy",
-        str(int(dy)),
-        "--dz",
-        str(int(dz)),
-        "--tile-size",
-        str(int(tile_size)),
     ]
     log_path = os.path.splitext(png_path)[0] + ".preview.log"
     try:
         with open(log_path, "w", encoding="utf-8") as log_file:
-            subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
-        _log(f"[Voxelator] Preview launched: {png_path}")
+            subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True, cwd=os.path.dirname(script_path))
+        _log(f"[Voxelator] Preview launched: {png_path} ({preview_python})")
     except Exception as exc:
         _log(f"[Voxelator] Preview launch failed: {exc}")
 
@@ -726,6 +754,8 @@ def _world_bounds(mesh, matrix_world):
 
 _NATIVE_FN = None
 _NATIVE_TRIED = False
+_PREVIEW_PYTHON = None
+_PREVIEW_PYTHON_TRIED = False
 
 def _get_native_voxelizer():
     """Compile (first run) and load libvoxelize.so. Returns the ctypes function or None."""
@@ -1777,7 +1807,7 @@ class OBJECT_OT_voxelize(Operator):
         _save_voxel_spritesheet(dx, dy, dz, save_path, cube_color_map, self.voxelizeResolution, progress=progress, progress_start=85.0, progress_end=95.0)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
         if self.see_preview:
-            _launch_preview_process(bpy.path.abspath(save_path), dx, dy, dz, self.voxelizeResolution)
+            _launch_preview_process(bpy.path.abspath(save_path))
 
         if self.slices_only:
             bpy.data.objects.remove(target, do_unlink=True)
