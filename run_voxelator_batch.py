@@ -149,6 +149,8 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
     lines.append(f"Failed: {payload['failed']}")
     lines.append(f"Skipped: {payload['skipped']}")
     lines.append(f"Cleaned files: {payload.get('cleaned_files', 0)}")
+    if payload.get("settings"):
+        lines.append(f"Effective bake resolution: {payload['settings'].get('effective_bake_res', 0)}")
     lines.append("")
 
     if payload["failures"]:
@@ -166,6 +168,10 @@ def _write_reports(report_txt: Path, report_json: Path, payload: dict) -> None:
 
     report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
     report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _effective_bake_resolution(bake_res: int, voxel_res: int) -> int:
+    return min(max(64, int(bake_res)), max(64, int(voxel_res) * 8))
 
 
 def _relative_parent_for_output(fbx: Path, input_dir: Path, project_dir: Path) -> Path:
@@ -413,6 +419,7 @@ def main() -> int:
             "apply_modifiers": args.apply_modifiers,
             "bake_colors": args.bake_colors,
             "bake_res": args.bake_res,
+            "effective_bake_res": _effective_bake_resolution(args.bake_res, args.res) if args.bake_colors else 0,
             "jobs": args.jobs,
             "rot_offset": args.rot_offset,
             "export_animation": args.export_animation,

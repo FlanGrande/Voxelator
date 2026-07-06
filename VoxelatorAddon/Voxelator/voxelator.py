@@ -146,7 +146,7 @@ def _find_preview_python():
     _log("[Voxelator] Preview launch skipped: no Python with imgui_bundle, PIL, numpy, and PyOpenGL found. Set VOXELATOR_PREVIEW_PYTHON to override.")
     return None
 
-def _launch_preview_process(png_path):
+def _launch_preview_process(png_path, effective_bake_resolution=0):
     if bpy.app.background:
         return
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview_voxel_slices.py")
@@ -163,6 +163,8 @@ def _launch_preview_process(png_path):
         "--png",
         png_path,
     ]
+    if effective_bake_resolution:
+        cmd.extend(["--effective-bake-res", str(int(effective_bake_resolution))])
     log_path = os.path.splitext(png_path)[0] + ".preview.log"
     try:
         with open(log_path, "w", encoding="utf-8") as log_file:
@@ -1597,7 +1599,8 @@ class OBJECT_OT_voxelize(Operator):
         _log(f"[Voxelator] Start: {source_name}")
         _log(f"[Voxelator] res: {self.voxelizeResolution} separate_cubes: {self.separate_cubes}")
         _log(f"[Voxelator] apply_modifiers: {self.apply_modifiers}")
-        _log(f"[Voxelator] bake_colors: {self.bake_colors} bake_resolution: {self.bake_resolution}")
+        eff_bake_res = _effective_bake_resolution(self.bake_resolution, self.voxelizeResolution) if self.bake_colors else 0
+        _log(f"[Voxelator] bake_colors: {self.bake_colors} bake_resolution: {self.bake_resolution} effective_bake_resolution: {eff_bake_res}")
         _log(f"[Voxelator] rotation_offset_deg: {self.rotation_offset_deg}")
         _log(f"[Voxelator] animation: {self.animation_action}")
         _log(f"[Voxelator] export_animation: {self.export_animation} frame_step: {self.frame_step}")
@@ -1618,12 +1621,12 @@ class OBJECT_OT_voxelize(Operator):
 
         try:
             if self.export_animation:
-                return self._execute_animation(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress)
-            return self._execute_static(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress)
+                return self._execute_animation(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress, eff_bake_res)
+            return self._execute_static(context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress, eff_bake_res)
         finally:
             progress.end()
 
-    def _execute_animation(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress):
+    def _execute_animation(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, progress, eff_bake_res):
         if self.export_animation:
             if self.animation_action in {"", "NONE"}:
                 _log("[Voxelator] Aborted: no animation selected for export")
@@ -1741,7 +1744,6 @@ class OBJECT_OT_voxelize(Operator):
                 bake_uv_flat = None
                 if self.bake_colors:
                     progress.update(15.0, "Baking base colors")
-                    eff_bake_res = _effective_bake_resolution(self.bake_resolution, self.voxelizeResolution)
                     bake_key = (source_name, bool(self.apply_modifiers), int(eff_bake_res))
                     cached_bake = _BAKE_CACHE.get("entry")
                     if self.reuse_bake and cached_bake and cached_bake["key"] == bake_key:
@@ -1821,7 +1823,7 @@ class OBJECT_OT_voxelize(Operator):
             self.report({'INFO'}, f"Voxelator completed animation PNG: {os.path.basename(save_path)}")
             return {'FINISHED'}
 
-    def _execute_static(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress):
+    def _execute_static(self, context, source, source_name, depsgraph, rot_offset_matrix, save_path, total_start, stage_start, progress, eff_bake_res):
         progress.update(5.0, "Preparing mesh")
         target_mesh = _mesh_from_source(source, depsgraph, self.apply_modifiers)
         target = bpy.data.objects.new(source_name + "_voxelized", target_mesh)
@@ -1902,9 +1904,7 @@ class OBJECT_OT_voxelize(Operator):
         bake_uv_flat = None
         if self.bake_colors:
             progress.update(25.0, "Baking base colors")
-            bake_pixels, bake_uv_flat = _bake_base_color_image(
-                context, target, _effective_bake_resolution(self.bake_resolution, self.voxelizeResolution)
-            )
+            bake_pixels, bake_uv_flat = _bake_base_color_image(context, target, eff_bake_res)
         _log(f"[Voxelator][Timing] Bake stage (unwrap+bake+readback): {time.perf_counter() - stage_start:.3f}s")
         stage_start = time.perf_counter()
         progress.update(45.0, "Mapping voxel colors")
@@ -1932,7 +1932,7 @@ class OBJECT_OT_voxelize(Operator):
         _save_voxel_spritesheet(dx, dy, dz, save_path, cube_color_map, self.voxelizeResolution, progress=progress, progress_start=85.0, progress_end=95.0)
         _log(f"[Voxelator][Timing] Spritesheet: {time.perf_counter() - stage_start:.3f}s")
         if self.see_preview:
-            _launch_preview_process(bpy.path.abspath(save_path))
+            _launch_preview_process(bpy.path.abspath(save_path), eff_bake_res)
 
         if self.slices_only:
             bpy.data.objects.remove(target, do_unlink=True)

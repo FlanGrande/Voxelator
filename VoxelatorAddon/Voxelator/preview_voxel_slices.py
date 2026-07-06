@@ -46,6 +46,7 @@ class Model:
     non_empty_layers: int
     bounds: tuple[int, int, int] | None
     file_size: int
+    effective_bake_res: int = 0
     sprite_atlas: TextureAtlas | None = None
 
 
@@ -77,7 +78,7 @@ def _infer_static_layout(width: int, height: int, tile_size_arg: int | None) -> 
     return tile, width // tile
 
 
-def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: int = 1) -> Model:
+def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: int = 1, effective_bake_res: int = 0) -> Model:
     img = Image.open(path).convert("RGBA")
     arr = np.asarray(img, dtype=np.uint8)
     height, width = arr.shape[:2]
@@ -111,6 +112,7 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
         non_empty_layers=non_empty_layers,
         bounds=bounds,
         file_size=path.stat().st_size,
+        effective_bake_res=max(0, int(effective_bake_res)),
     )
 
 
@@ -362,6 +364,7 @@ class PreviewApp:
             ("File", _format_bytes(model.file_size)),
             ("PNG", f"{model.image_width}x{model.image_height}"),
             ("Resolution", str(model.tile_size)),
+            ("Bake Res", str(model.effective_bake_res) if model.effective_bake_res else "n/a"),
             ("Layers", str(model.layers)),
             ("Cells", f"{model.cell_count} ({occupancy:.1f}%)"),
             ("Non-empty", str(model.non_empty_layers)),
@@ -381,11 +384,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Preview a Voxelator static stacked PNG")
     parser.add_argument("--png", required=True, help="Static stacked PNG produced by Voxelator")
     parser.add_argument("--tile-size", type=int, default=0, help="Optional tile size override")
+    parser.add_argument("--effective-bake-res", type=int, default=0, help="Actual bake resolution used by Voxelator")
     parser.add_argument("--alpha-threshold", type=int, default=1, help="Minimum alpha value (0-255) to count a voxel")
     args = parser.parse_args()
 
     try:
-        model = _load_model(Path(args.png).expanduser().resolve(), args.tile_size or None, args.alpha_threshold)
+        model = _load_model(Path(args.png).expanduser().resolve(), args.tile_size or None, args.alpha_threshold, args.effective_bake_res)
     except (OSError, ValueError) as exc:
         print(f"Voxelator preview error: {exc}", file=sys.stderr)
         raise SystemExit(1)
