@@ -185,12 +185,12 @@ class PreviewApp:
         self.model = model
         self.render_mode = "Stacked Sprite"
         self.angle = 0.0
-        self.bg_dark = True
+        self.preview_bg_dark = True
         self.pitch = 0.0
         self.up_axis = "+Z"
         self.layer_offset = 1.0
+        self._raw_layer_offset = self.layer_offset
         self.rotation_rate = math.radians(135.0)
-        self.offset_rate = 3.0
         self.preview_size = min(640, max(320, model.tile_size * 7))
 
     def run(self) -> None:
@@ -228,15 +228,15 @@ class PreviewApp:
         rail_gap = 12.0
         panel_w = self.preview_size + rail_gap + rail_w + margin * 2
         panel_h = self.preview_size + 390.0
-        panel_bg = _u32(0, 0, 0) if self.bg_dark else _u32(255, 255, 255)
-        text_col = _u32(235, 235, 235) if self.bg_dark else _u32(20, 20, 20)
-        muted_col = _u32(165, 165, 165) if self.bg_dark else _u32(80, 80, 80)
+        panel_bg = _u32(0, 0, 0)
+        text_col = _u32(235, 235, 235)
+        muted_col = _u32(165, 165, 165)
 
         draw.add_rect_filled(origin, imgui.ImVec2(origin.x + panel_w, origin.y + panel_h), panel_bg)
 
         canvas_min = imgui.ImVec2(origin.x + margin, origin.y + margin + 22.0)
         canvas_max = imgui.ImVec2(canvas_min.x + self.preview_size, canvas_min.y + self.preview_size)
-        canvas_bg = _u32(8, 8, 8) if self.bg_dark else _u32(245, 245, 245)
+        canvas_bg = _u32(8, 8, 8) if self.preview_bg_dark else _u32(245, 245, 245)
         draw.add_rect_filled(canvas_min, canvas_max, canvas_bg)
 
         self._draw_model(draw, canvas_min, canvas_max)
@@ -263,11 +263,11 @@ class PreviewApp:
         rail_x = canvas_max.x + rail_gap
         rail_y = canvas_min.y
         if self._background_button(imgui.ImVec2(rail_x, rail_y), imgui.ImVec2(rail_w, rail_w)):
-            self.bg_dark = not self.bg_dark
-        if self._held_button("+", imgui.ImVec2(rail_x, rail_y + rail_w + 20.0), imgui.ImVec2(rail_w, rail_w)):
-            self._adjust_layer_offset(self.offset_rate * dt)
-        if self._held_button("-", imgui.ImVec2(rail_x, rail_y + (rail_w + 20.0) * 2.0), imgui.ImVec2(rail_w, rail_w)):
-            self._adjust_layer_offset(-self.offset_rate * dt)
+            self.preview_bg_dark = not self.preview_bg_dark
+        if self._press_button("+", imgui.ImVec2(rail_x, rail_y + rail_w + 20.0), imgui.ImVec2(rail_w, rail_w)):
+            self._set_layer_offset(self.layer_offset + 0.1)
+        if self._press_button("-", imgui.ImVec2(rail_x, rail_y + (rail_w + 20.0) * 2.0), imgui.ImVec2(rail_w, rail_w)):
+            self._set_layer_offset(self.layer_offset - 0.1)
 
         button_y = canvas_max.y + 18.0
         if self._held_button("<", imgui.ImVec2(canvas_min.x, button_y), imgui.ImVec2(64, 34)):
@@ -299,11 +299,16 @@ class PreviewApp:
         imgui.button(label, size)
         return imgui.is_item_active()
 
+    def _press_button(self, label: str, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
+        imgui.set_cursor_screen_pos(pos)
+        imgui.button(label, size)
+        return imgui.is_item_clicked()
+
     def _background_button(self, pos: imgui.ImVec2, size: imgui.ImVec2) -> bool:
         imgui.set_cursor_screen_pos(pos)
         clicked = imgui.button("##bg_toggle", size)
         draw = imgui.get_window_draw_list()
-        fill = _u32(255, 255, 255) if self.bg_dark else _u32(0, 0, 0)
+        fill = _u32(255, 255, 255) if self.preview_bg_dark else _u32(0, 0, 0)
         inset = 10.0
         draw.add_rect_filled(
             imgui.ImVec2(pos.x + inset, pos.y + inset),
@@ -317,7 +322,7 @@ class PreviewApp:
         imgui.set_cursor_screen_pos(pos)
         clicked = imgui.button("##mode_toggle", size)
         draw = imgui.get_window_draw_list()
-        col = _u32(230, 230, 230) if self.bg_dark else _u32(20, 20, 20)
+        col = _u32(230, 230, 230)
         if self.render_mode == "Voxel":
             a = imgui.ImVec2(pos.x + 8.0, pos.y + 11.0)
             b = imgui.ImVec2(pos.x + 17.0, pos.y + 6.0)
@@ -378,7 +383,12 @@ class PreviewApp:
     def _adjust_layer_offset(self, delta: float) -> None:
         if abs(delta) <= 1.0e-8:
             return
-        self.layer_offset += delta
+        self._set_layer_offset(self._raw_layer_offset + delta)
+
+    def _set_layer_offset(self, value: float) -> None:
+        self._raw_layer_offset = max(-1.0, min(1.0, value))
+        self.layer_offset = round(self._raw_layer_offset * 10.0) / 10.0
+        self._raw_layer_offset = self.layer_offset
 
     def _draw_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         if self.render_mode == "Voxel":
