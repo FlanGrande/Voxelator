@@ -13,6 +13,7 @@ bl_info = {
 
 import bpy
 import ctypes
+import hashlib
 import os
 import subprocess
 import sys
@@ -449,9 +450,13 @@ def _sample_image_bilinear(image, uv, image_cache):
     w, h, pixels = cached
     return _sample_pixels_bilinear(w, h, pixels, uv)
 
-def _sample_pixels_bilinear(w, h, pixels, uv):
-    u = uv[0] % 1.0
-    v = uv[1] % 1.0
+def _sample_pixels_bilinear(w, h, pixels, uv, wrap=True):
+    if wrap:
+        u = uv[0] % 1.0
+        v = uv[1] % 1.0
+    else:
+        u = _clamp01(uv[0])
+        v = _clamp01(uv[1])
 
     x = u * (w - 1)
     y = v * (h - 1)
@@ -769,13 +774,25 @@ def _get_native_voxelizer():
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     src_path = os.path.join(base_dir, "voxelize_native.c")
-    lib_path = os.path.join(base_dir, "libvoxelize.so")
     if not os.path.isfile(src_path):
         _log(f"[Voxelator] Native voxelizer source not found: {src_path}")
         return None
 
     try:
-        needs_build = (not os.path.isfile(lib_path)) or os.path.getmtime(lib_path) < os.path.getmtime(src_path)
+        # Name the library after the source hash. A stale library from an
+        # older source lives at a different path, so dlopen never returns a
+        # cached in-process handle for outdated code (same-path dlopen would).
+        with open(src_path, "rb") as src_file:
+            src_digest = hashlib.sha1(src_file.read()).hexdigest()[:12]
+        lib_name = f"libvoxelize-{src_digest}.so"
+        lib_path = os.path.join(base_dir, lib_name)
+        for stale in os.listdir(base_dir):
+            if stale.startswith("libvoxelize") and stale.endswith(".so") and stale != lib_name:
+                try:
+                    os.remove(os.path.join(base_dir, stale))
+                except Exception:
+                    pass
+        needs_build = not os.path.isfile(lib_path)
         if needs_build:
             proc = None
             for flags in (("-O3", "-fopenmp"), ("-O3",)):
@@ -1396,7 +1413,7 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
                         if bake_uv is not None:
                             break
                 if bake_uv is not None:
-                    color = _sample_pixels_bilinear(bake_w, bake_h, bake_px, bake_uv)
+                    color = _sample_pixels_bilinear(bake_w, bake_h, bake_px, bake_uv, wrap=False)
 
             if color is None and poly.material_index < len(source_mats):
                 mat = source_mats[poly.material_index]

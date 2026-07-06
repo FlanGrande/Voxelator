@@ -87,9 +87,9 @@ def install_package(package_dir: Path, addons_dir: Path, *, keep_native_lib: boo
         shutil.rmtree(target)
     shutil.copytree(package_dir, target)
 
-    native_lib = target / "libvoxelize.so"
-    if native_lib.exists() and not keep_native_lib:
-        native_lib.unlink()
+    if not keep_native_lib:
+        for native_lib in target.glob("libvoxelize*.so"):
+            native_lib.unlink()
     return target
 
 

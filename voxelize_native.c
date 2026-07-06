@@ -281,8 +281,10 @@ done:
 static void sample_bilinear(const float *px, int64_t w, int64_t h,
                             double u, double v, float out[4])
 {
-    u -= floor(u);
-    v -= floor(v);
+    if (u < 0.0) u = 0.0;
+    else if (u > 1.0) u = 1.0;
+    if (v < 0.0) v = 0.0;
+    else if (v > 1.0) v = 1.0;
     double x = u * (double)(w - 1);
     double y = v * (double)(h - 1);
     int64_t x0 = (int64_t)floor(x);

@@ -81,7 +81,7 @@ Install the ZIP package, not only `voxelator.py`; the native voxelizer and previ
 
 ### Native Voxelizer
 
-The surface voxelization loop and the baked-color material mapping (nearest-triangle lookup plus bilinear bake sampling) are implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python implementations and logs the reason. Delete `libvoxelize.so` to force a rebuild.
+The surface voxelization loop and the baked-color material mapping (nearest-triangle lookup plus bilinear bake sampling) are implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize-<source hash>.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. The hash-based name guarantees that a changed C source is recompiled and loaded fresh even inside a running Blender session. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python implementations and logs the reason.
 
 ### Preview Window
 
