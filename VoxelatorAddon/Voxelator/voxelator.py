@@ -128,7 +128,7 @@ def _find_preview_python():
     if _PREVIEW_PYTHON_TRIED:
         return _PREVIEW_PYTHON
     _PREVIEW_PYTHON_TRIED = True
-    check_code = "import imgui_bundle, PIL, numpy"
+    check_code = "import imgui_bundle, PIL, numpy, OpenGL"
     for candidate in _preview_python_candidates():
         try:
             result = subprocess.run(
@@ -142,7 +142,7 @@ def _find_preview_python():
         if result.returncode == 0:
             _PREVIEW_PYTHON = candidate
             return _PREVIEW_PYTHON
-    _log("[Voxelator] Preview launch skipped: no Python with imgui_bundle, PIL, and numpy found. Set VOXELATOR_PREVIEW_PYTHON to override.")
+    _log("[Voxelator] Preview launch skipped: no Python with imgui_bundle, PIL, numpy, and PyOpenGL found. Set VOXELATOR_PREVIEW_PYTHON to override.")
     return None
 
 def _launch_preview_process(png_path):

@@ -14,10 +14,10 @@ This fork also includes command-line helpers for importing `.fbx` files, exporti
 python -m pip install pillow
 ```
 
-- `See Preview` uses a separate Python process with `imgui-bundle`, Pillow, and NumPy. The add-on auto-detects a compatible Python; set `VOXELATOR_PREVIEW_PYTHON=/path/to/python` if needed.
+- `See Preview` uses a separate Python process with `imgui-bundle`, Pillow, NumPy, and PyOpenGL. The add-on auto-detects a compatible Python; set `VOXELATOR_PREVIEW_PYTHON=/path/to/python` if needed.
 
 ```bash
-python -m pip install imgui-bundle pillow numpy
+python -m pip install imgui-bundle pillow numpy PyOpenGL
 ```
 
 - GNU `parallel` only if you use `remake_men_and_women.sh`.
@@ -85,7 +85,7 @@ The surface voxelization loop is implemented in C (`voxelize_native.c`). On firs
 
 ### Preview Window
 
-`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG and defaults to `Stacked Sprite` mode, which draws the original PNG slices as separate cards. The top-left icon-only button switches to `Voxel` mode, which reconstructs a voxel surface and shows `-X`, `+X`, `-Y`, `+Y`, `-Z`, and `+Z` up-axis buttons. Both modes rotate while holding the left/right buttons or keyboard arrows, support mouse wheel and left-click drag rotation, adjust layer offset with vertical drag or the right-side `+`/`-` buttons (snapped to `0.1`, clamped from `-1` to `1`), and have a right-side black/white toggle for the preview background.
+`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG and defaults to `Stacked Sprite` mode, which draws the original PNG slices as GPU-textured cards. The top-left icon-only button switches to `Voxel` mode, which renders GPU-textured volume slices and shows `-X`, `+X`, `-Y`, `+Y`, `-Z`, and `+Z` up-axis buttons. Both modes rotate while holding the left/right buttons or keyboard arrows, support mouse wheel and left-click drag rotation, adjust layer offset with vertical drag or the right-side `+`/`-` buttons (snapped to `0.1`, clamped from `-1` to `1`), and have a right-side black/white toggle for the preview background.
 
 ## Output Format
 

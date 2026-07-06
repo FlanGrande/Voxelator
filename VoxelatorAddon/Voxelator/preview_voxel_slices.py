@@ -9,25 +9,31 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from OpenGL import GL as gl
 from PIL import Image
 from imgui_bundle import imgui, hello_imgui, immapp
 
 
-FACE_DEFS = (
-    ((1, 0, 0), ((1, -1, -1), (1, -1, 1), (1, 1, 1), (1, 1, -1))),
-    ((-1, 0, 0), ((-1, -1, -1), (-1, 1, -1), (-1, 1, 1), (-1, -1, 1))),
-    ((0, 1, 0), ((-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1))),
-    ((0, -1, 0), ((-1, -1, -1), (-1, -1, 1), (1, -1, 1), (1, -1, -1))),
-    ((0, 0, 1), ((-1, -1, 1), (-1, 1, 1), (1, 1, 1), (1, -1, 1))),
-    ((0, 0, -1), ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1))),
-)
+@dataclass
+class TextureAtlas:
+    rgba: np.ndarray
+    tile_width: int
+    tile_height: int
+    layers: int
+    cols: int
+    texture_id: int | None = None
 
+    @property
+    def rows(self) -> int:
+        return math.ceil(self.layers / self.cols)
 
-@dataclass(frozen=True)
-class Face:
-    normal: tuple[int, int, int]
-    corners: tuple[tuple[float, float, float], ...]
-    color: tuple[int, int, int, int]
+    @property
+    def width(self) -> int:
+        return int(self.rgba.shape[1])
+
+    @property
+    def height(self) -> int:
+        return int(self.rgba.shape[0])
 
 
 @dataclass
@@ -37,13 +43,15 @@ class Model:
     image_height: int
     tile_size: int
     layers: int
-    slice_cells: dict[tuple[int, int, int], tuple[int, int, int, int]]
-    cells: dict[tuple[int, int, int], tuple[int, int, int, int]]
-    faces: list[Face]
+    source_tiles: np.ndarray
+    cell_count: int
     unique_colors: int
     non_empty_layers: int
     bounds: tuple[int, int, int] | None
     file_size: int
+    sprite_atlas: TextureAtlas | None = None
+    voxel_stacks: dict[str, dict[str, TextureAtlas]] | None = None
+    voxel_dims: dict[str, tuple[int, int, int]] | None = None
 
 
 def _u32(r: int, g: int, b: int, a: int = 255) -> int:
@@ -80,91 +88,186 @@ def _load_model(path: Path, tile_size_arg: int | None = None, alpha_threshold: i
     height, width = arr.shape[:2]
     tile, layers = _infer_static_layout(width, height, tile_size_arg)
 
-    slice_cells: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
-    colors = set()
-    zs: list[int] = []
-
+    source_tiles = np.empty((layers, tile, tile, 4), dtype=np.uint8)
     for iz in range(layers):
-        x0 = iz * tile
-        tile_px = arr[:, x0 : x0 + tile, :]
-        alpha = tile_px[:, :, 3]
-        coords = np.argwhere(alpha > alpha_threshold)
-        for row, col in coords:
-            y = tile - 1 - int(row)
-            x = int(col)
-            rgba_np = tile_px[row, col]
-            color = (int(rgba_np[0]), int(rgba_np[1]), int(rgba_np[2]), int(rgba_np[3]))
-            slice_cells[(x, y, iz)] = color
-            colors.add(color[:3])
-            zs.append(iz)
+        source_tiles[iz] = arr[:, iz * tile : (iz + 1) * tile, :]
 
-    cells = _orient_cells(slice_cells, "+Z")
-    bounds = _bounds_for_cells(cells)
-    faces = _build_faces(cells, tile, layers)
+    alpha = source_tiles[:, :, :, 3] > alpha_threshold
+    cell_count = int(alpha.sum())
+    non_empty_layers = int(alpha.any(axis=(1, 2)).sum())
+    unique_colors = 0
+    if cell_count:
+        rgb = source_tiles[:, :, :, :3]
+        packed = (
+            rgb[:, :, :, 0].astype(np.uint32)
+            | (rgb[:, :, :, 1].astype(np.uint32) << 8)
+            | (rgb[:, :, :, 2].astype(np.uint32) << 16)
+        )
+        unique_colors = int(np.unique(packed[alpha]).size)
+
+    bounds = _bounds_for_mask(alpha)
     return Model(
         path=path,
         image_width=width,
         image_height=height,
         tile_size=tile,
         layers=layers,
-        slice_cells=slice_cells,
-        cells=cells,
-        faces=faces,
-        unique_colors=len(colors),
-        non_empty_layers=len(set(zs)),
+        source_tiles=source_tiles,
+        cell_count=cell_count,
+        unique_colors=unique_colors,
+        non_empty_layers=non_empty_layers,
         bounds=bounds,
         file_size=path.stat().st_size,
+        voxel_stacks={},
+        voxel_dims={},
     )
 
 
-def _orient_cells(cells: dict[tuple[int, int, int], tuple[int, int, int, int]], up_axis: str) -> dict[tuple[int, int, int], tuple[int, int, int, int]]:
-    if up_axis == "+X":
-        return {(y, x, z): color for (x, y, z), color in cells.items()}
-    if up_axis == "-X":
-        return {(y, -x, z): color for (x, y, z), color in cells.items()}
-    if up_axis == "+Y":
-        return dict(cells)
-    if up_axis == "-Y":
-        return {(x, -y, z): color for (x, y, z), color in cells.items()}
-    if up_axis == "-Z":
-        return {(x, -z, y): color for (x, y, z), color in cells.items()}
-    return {(x, z, y): color for (x, y, z), color in cells.items()}
+def _axis_span(present: np.ndarray) -> int:
+    idx = np.flatnonzero(present)
+    if idx.size == 0:
+        return 0
+    return int(idx[-1] - idx[0] + 1)
 
 
-def _bounds_for_cells(cells: dict[tuple[int, int, int], tuple[int, int, int, int]]) -> tuple[int, int, int] | None:
-    if not cells:
+def _bounds_for_mask(alpha: np.ndarray) -> tuple[int, int, int] | None:
+    if not bool(alpha.any()):
         return None
-    xs = [cell[0] for cell in cells]
-    ys = [cell[1] for cell in cells]
-    zs = [cell[2] for cell in cells]
-    return (max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, max(zs) - min(zs) + 1)
+    z_present = alpha.any(axis=(1, 2))
+    row_present = alpha.any(axis=(0, 2))
+    x_present = alpha.any(axis=(0, 1))
+    return (_axis_span(x_present), _axis_span(row_present), _axis_span(z_present))
 
 
-def _build_faces(cells: dict[tuple[int, int, int], tuple[int, int, int, int]], tile: int, layers: int) -> list[Face]:
-    occupied = set(cells)
-    if not occupied:
-        return []
-    xs = [cell[0] for cell in occupied]
-    ys = [cell[1] for cell in occupied]
-    zs = [cell[2] for cell in occupied]
-    cx = (min(xs) + max(xs)) * 0.5
-    cy = (min(ys) + max(ys)) * 0.5
-    cz = (min(zs) + max(zs)) * 0.5
+def _pack_tiles(tiles: np.ndarray) -> TextureAtlas:
+    layers, tile_h, tile_w, _channels = tiles.shape
+    cols = max(1, math.ceil(math.sqrt(layers)))
+    rows = math.ceil(layers / cols)
+    atlas = np.zeros((rows * tile_h, cols * tile_w, 4), dtype=np.uint8)
+    for i in range(layers):
+        row = i // cols
+        col = i % cols
+        atlas[row * tile_h : (row + 1) * tile_h, col * tile_w : (col + 1) * tile_w] = tiles[i]
+    return TextureAtlas(np.ascontiguousarray(atlas), tile_w, tile_h, layers, cols)
 
-    faces: list[Face] = []
-    for cell in sorted(occupied):
-        ix, iy, iz = cell
-        color = cells[cell]
-        for normal, corners in FACE_DEFS:
-            nx, ny, nz = normal
-            if (ix + nx, iy + ny, iz + nz) in occupied:
-                continue
-            pts = tuple(
-                ((ix - cx) + sx * 0.5, (iy - cy) + sy * 0.5, (iz - cz) + sz * 0.5)
-                for sx, sy, sz in corners
-            )
-            faces.append(Face(normal=normal, corners=pts, color=color))
-    return faces
+
+def _source_volume(model: Model) -> np.ndarray:
+    # source_tiles axis order: source Z, image row(top-down), source X.
+    # volume axis order: source X, source Y(bottom-up), source Z.
+    return model.source_tiles[:, ::-1, :, :].transpose(2, 1, 0, 3)
+
+
+def _world_volume(model: Model, up_axis: str) -> np.ndarray:
+    vol = _source_volume(model)
+    if up_axis == "+X":
+        return vol.transpose(1, 0, 2, 3)
+    if up_axis == "-X":
+        return vol.transpose(1, 0, 2, 3)[:, ::-1, :, :]
+    if up_axis == "+Y":
+        return vol
+    if up_axis == "-Y":
+        return vol[:, ::-1, :, :]
+    if up_axis == "-Z":
+        return vol.transpose(0, 2, 1, 3)[:, ::-1, :, :]
+    return vol.transpose(0, 2, 1, 3)
+
+
+def _sprite_atlas(model: Model) -> TextureAtlas:
+    if model.sprite_atlas is None:
+        model.sprite_atlas = _pack_tiles(model.source_tiles)
+    return model.sprite_atlas
+
+
+def _release_atlas(atlas: TextureAtlas) -> None:
+    if atlas.texture_id is not None:
+        try:
+            gl.glDeleteTextures([atlas.texture_id])
+        except Exception:
+            pass
+        atlas.texture_id = None
+
+
+def _voxel_stacks(model: Model, up_axis: str) -> tuple[dict[str, TextureAtlas], tuple[int, int, int]]:
+    if model.voxel_stacks is None:
+        model.voxel_stacks = {}
+    if model.voxel_dims is None:
+        model.voxel_dims = {}
+    cached = model.voxel_stacks.get(up_axis)
+    if cached is not None:
+        return cached, model.voxel_dims[up_axis]
+
+    # Keep only the active orientation cached; free GPU textures of the rest.
+    for old_axis in list(model.voxel_stacks):
+        for atlas in model.voxel_stacks[old_axis].values():
+            _release_atlas(atlas)
+        del model.voxel_stacks[old_axis]
+        model.voxel_dims.pop(old_axis, None)
+
+    world = _world_volume(model, up_axis)
+    world_x, world_y, world_z, _channels = world.shape
+
+    # Z stack: XY planes. tile row 0 = max world Y, col 0 = min world X.
+    tiles_z = np.empty((world_z, world_y, world_x, 4), dtype=np.uint8)
+    for iz in range(world_z):
+        tiles_z[iz] = world[:, ::-1, iz, :].transpose(1, 0, 2)
+
+    # X stack: ZY planes. tile row 0 = max world Y, col 0 = min world Z.
+    tiles_x = np.empty((world_x, world_y, world_z, 4), dtype=np.uint8)
+    for ix in range(world_x):
+        tiles_x[ix] = world[ix, ::-1, :, :]
+
+    # Y stack: XZ planes. tile row 0 = min world Z, col 0 = min world X.
+    tiles_y = np.empty((world_y, world_z, world_x, 4), dtype=np.uint8)
+    for iy in range(world_y):
+        tiles_y[iy] = world[:, iy, :, :].transpose(1, 0, 2)
+
+    stacks = {
+        "X": _pack_tiles(tiles_x),
+        "Y": _pack_tiles(tiles_y),
+        "Z": _pack_tiles(tiles_z),
+    }
+    dims = (world_x, world_y, world_z)
+    model.voxel_stacks[up_axis] = stacks
+    model.voxel_dims[up_axis] = dims
+    return stacks, dims
+
+
+def _ensure_texture(atlas: TextureAtlas):
+    if atlas.texture_id is None:
+        tex = int(gl.glGenTextures(1))
+        gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGBA8,
+            atlas.width,
+            atlas.height,
+            0,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            atlas.rgba,
+        )
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        atlas.texture_id = tex
+    return imgui.ImTextureRef(atlas.texture_id)
+
+
+def _tile_uvs(atlas: TextureAtlas, index: int) -> tuple[imgui.ImVec2, imgui.ImVec2, imgui.ImVec2, imgui.ImVec2]:
+    col = index % atlas.cols
+    row = index // atlas.cols
+    # Tiny inset keeps float rounding from sampling the neighboring atlas tile.
+    eps_u = 0.02 / atlas.width
+    eps_v = 0.02 / atlas.height
+    u0 = (col * atlas.tile_width) / atlas.width + eps_u
+    v0 = (row * atlas.tile_height) / atlas.height + eps_v
+    u1 = ((col + 1) * atlas.tile_width) / atlas.width - eps_u
+    v1 = ((row + 1) * atlas.tile_height) / atlas.height - eps_v
+    return (imgui.ImVec2(u0, v0), imgui.ImVec2(u1, v0), imgui.ImVec2(u1, v1), imgui.ImVec2(u0, v1))
 
 
 def _rotate_project(point: tuple[float, float, float], angle: float, pitch: float, scale: float, cx: float, cy: float) -> tuple[float, float, float]:
@@ -366,9 +469,6 @@ class PreviewApp:
 
     def _set_up_axis(self, up_axis: str) -> None:
         self.up_axis = up_axis
-        self.model.cells = _orient_cells(self.model.slice_cells, up_axis)
-        self.model.bounds = _bounds_for_cells(self.model.cells)
-        self.model.faces = _build_faces(self.model.cells, self.model.tile_size, self.model.layers)
         self.angle = 0.0
         self.pitch = 0.0
 
@@ -398,77 +498,88 @@ class PreviewApp:
 
     def _draw_stacked_sprite(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         model = self.model
-        if not model.slice_cells:
+        if model.cell_count <= 0:
             return
+        atlas = _sprite_atlas(model)
+        tex_id = _ensure_texture(atlas)
         w = canvas_max.x - canvas_min.x
         h = canvas_max.y - canvas_min.y
         cx = canvas_min.x + w * 0.5
         cy = canvas_min.y + h * 0.54
-        xs = [cell[0] for cell in model.slice_cells]
-        ys = [cell[1] for cell in model.slice_cells]
-        zs = [cell[2] for cell in model.slice_cells]
-        center_x = (min(xs) + max(xs)) * 0.5
-        center_y = (min(ys) + max(ys)) * 0.5
-        center_z = (min(zs) + max(zs)) * 0.5
+        center_z = (model.layers - 1) * 0.5
         stack_span = abs((model.layers - 1) * self.layer_offset)
-        max_span = max(max(xs) - min(xs) + 1, max(ys) - min(ys) + 1 + stack_span, 1.0)
+        max_span = max(model.tile_size, model.tile_size + stack_span, 1.0)
         scale = min(w, h) * 0.72 / max_span
         ca = math.cos(self.angle)
         sa = math.sin(self.angle)
 
-        quads = []
-        for (x, y, z), color in sorted(model.slice_cells.items(), key=lambda item: item[0][2]):
-            layer_x = 0.0
+        half = model.tile_size * 0.5
+        for z in range(model.layers):
             layer_y = -(z - center_z) * self.layer_offset
-            corners = []
-            for lx, ly in (
-                (x - center_x - 0.5, -(y - center_y) - 0.5),
-                (x - center_x + 0.5, -(y - center_y) - 0.5),
-                (x - center_x + 0.5, -(y - center_y) + 0.5),
-                (x - center_x - 0.5, -(y - center_y) + 0.5),
-            ):
+            pts = []
+            for lx, ly in ((-half, -half), (half, -half), (half, half), (-half, half)):
                 rx = ca * lx - sa * ly
                 ry = sa * lx + ca * ly
-                corners.append((cx + (rx + layer_x) * scale, cy + (ry + layer_y) * scale))
-            quads.append((z, corners, color))
-
-        for _z, pts, color in quads:
-            col = _u32(*color)
-            p = [imgui.ImVec2(pts[i][0], pts[i][1]) for i in range(4)]
-            draw.add_quad_filled(p[0], p[1], p[2], p[3], col)
+                pts.append(imgui.ImVec2(cx + rx * scale, cy + (ry + layer_y) * scale))
+            uv = _tile_uvs(atlas, z)
+            draw.add_image_quad(tex_id, pts[0], pts[1], pts[2], pts[3], uv[0], uv[1], uv[2], uv[3])
 
     def _draw_voxel_model(self, draw, canvas_min: imgui.ImVec2, canvas_max: imgui.ImVec2) -> None:
         model = self.model
-        if not model.faces:
+        if model.cell_count <= 0:
             return
+        stacks, dims = _voxel_stacks(model, self.up_axis)
+        world_x, world_y, world_z = dims
         w = canvas_max.x - canvas_min.x
         h = canvas_max.y - canvas_min.y
         cx = canvas_min.x + w * 0.5
         cy = canvas_min.y + h * 0.54
-        bounds = model.bounds or (model.tile_size, model.tile_size, model.layers)
-        max_span = max(bounds[0], bounds[1], bounds[2], 1)
+        max_span = max(world_x, world_y, world_z, 1)
         scale = min(w, h) * 0.72 / max_span
 
-        faces = []
-        voxel_offset = self.layer_offset - 1.0
-        for face in model.faces:
-            projected = []
-            for point in face.corners:
-                px, py, pz = _rotate_project(point, self.angle, self.pitch, scale, cx, cy)
-                projected.append((px, py + pz * voxel_offset * scale, pz))
-            depth = sum(p[2] for p in projected) / 4.0
-            faces.append((depth, projected, face.color))
+        # View depth direction; slice along the axis most aligned with it to avoid edge-on stripes.
+        ca = math.cos(self.angle)
+        sa = math.sin(self.angle)
+        cp = math.cos(self.pitch)
+        sp = math.sin(self.pitch)
+        view_dir = (-cp * sa, sp, cp * ca)
+        axis = ("X", "Y", "Z")[max(range(3), key=lambda i: abs(view_dir[i]))]
+        atlas = stacks[axis]
+        tex_id = _ensure_texture(atlas)
 
-        for _depth, pts, color in sorted(faces, key=lambda item: item[0]):
-            col = _u32(*color)
-            p = [imgui.ImVec2(pts[i][0], pts[i][1]) for i in range(4)]
-            draw.add_quad_filled(p[0], p[1], p[2], p[3], col)
+        hx = world_x * 0.5
+        hy = world_y * 0.5
+        hz = world_z * 0.5
+        voxel_offset = self.layer_offset - 1.0
+        center = (atlas.layers - 1) * 0.5
+
+        quads = []
+        for i in range(atlas.layers):
+            c = i - center
+            if axis == "Z":
+                corners = ((-hx, hy, c), (hx, hy, c), (hx, -hy, c), (-hx, -hy, c))
+            elif axis == "X":
+                corners = ((c, hy, -hz), (c, hy, hz), (c, -hy, hz), (c, -hy, -hz))
+            else:
+                corners = ((-hx, c, -hz), (hx, c, -hz), (hx, c, hz), (-hx, c, hz))
+            pts = []
+            depth_sum = 0.0
+            for point in corners:
+                px, py, pz = _rotate_project(point, self.angle, self.pitch, scale, cx, cy)
+                pts.append(imgui.ImVec2(px, py + pz * voxel_offset * scale))
+                depth_sum += pz
+            quads.append((depth_sum / 4.0, i, pts))
+
+        for _depth, i, pts in sorted(quads, key=lambda item: item[0]):
+            uv = _tile_uvs(atlas, i)
+            draw.add_image_quad(tex_id, pts[0], pts[1], pts[2], pts[3], uv[0], uv[1], uv[2], uv[3])
 
     def _draw_stats(self, draw, pos: imgui.ImVec2, text_col: int, muted_col: int) -> None:
         model = self.model
-        active_cells = model.cells if self.render_mode == "Voxel" else model.slice_cells
-        active_bounds = model.bounds if self.render_mode == "Voxel" else _bounds_for_cells(_orient_cells(model.slice_cells, "+Z"))
-        occupancy = (len(active_cells) / max(1, model.tile_size * model.tile_size * model.layers)) * 100.0
+        active_bounds = (model.tile_size, model.tile_size, model.layers)
+        if self.render_mode == "Voxel":
+            _stacks, active_bounds = _voxel_stacks(model, self.up_axis)
+        occupancy = (model.cell_count / max(1, model.tile_size * model.tile_size * model.layers)) * 100.0
         bounds = "x".join(str(v) for v in active_bounds) if active_bounds else "empty"
         lines = [
             ("Name", model.path.name),
@@ -476,7 +587,7 @@ class PreviewApp:
             ("PNG", f"{model.image_width}x{model.image_height}"),
             ("Resolution", str(model.tile_size)),
             ("Layers", str(model.layers)),
-            ("Cells", f"{len(active_cells)} ({occupancy:.1f}%)"),
+            ("Cells", f"{model.cell_count} ({occupancy:.1f}%)"),
             ("Non-empty", str(model.non_empty_layers)),
             ("Bounds", bounds),
             ("Colors", str(model.unique_colors)),
