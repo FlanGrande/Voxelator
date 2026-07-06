@@ -69,7 +69,7 @@ Install the ZIP package, not only `voxelator.py`; the native voxelizer and previ
 - `Separate Cubes` - keeps cubes split instead of sharing vertices inside one mesh.
 - `Apply Modifiers` - applies all object modifiers before voxelizing. Enabled by default.
 - `Bake Colors` - bakes the exact evaluated Base Color of every material with Cycles (diffuse color pass, no lighting) and samples voxel colors from the bake. Handles any node graph. Enabled by default.
-- `Bake Resolution` - square resolution of the baked color image. Default `1024`.
+- `Bake Resolution` - cap for the square resolution of the baked color image. Default `1024`. The effective resolution auto-scales with the voxel resolution (about 8 texels per voxel cell edge) so small exports bake faster.
 - `Rotation Offset Z` - rotates the model around Z before voxelization.
 - `Animation` - selects an action from the current Blender file.
 - `Export Animation` - exports selected animation frames to one stacked PNG.
@@ -81,11 +81,11 @@ Install the ZIP package, not only `voxelator.py`; the native voxelizer and previ
 
 ### Native Voxelizer
 
-The surface voxelization loop is implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python voxelizer and logs the reason. Delete `libvoxelize.so` to force a rebuild.
+The surface voxelization loop and the baked-color material mapping (nearest-triangle lookup plus bilinear bake sampling) are implemented in C (`voxelize_native.c`). On first run, Voxelator compiles it automatically to `libvoxelize.so` next to `voxelator.py` using the system C compiler (`cc`), with OpenMP when available. If no compiler is present or compilation fails, Voxelator falls back to the slower pure-Python implementations and logs the reason. Delete `libvoxelize.so` to force a rebuild.
 
 ### Preview Window
 
-`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG and defaults to `Stacked Sprite` mode, which draws the original PNG slices as GPU-textured cards. The top-left icon-only button switches to `Voxel` mode, which renders GPU-textured volume slices and shows `-X`, `+X`, `-Y`, `+Y`, `-Z`, and `+Z` up-axis buttons. Both modes rotate while holding the left/right buttons or keyboard arrows, support mouse wheel and left-click drag rotation, adjust layer offset with vertical drag or the right-side `+`/`-` buttons (snapped to `0.1`, clamped from `-1` to `1`), and have a right-side black/white toggle for the preview background.
+`See Preview` launches `preview_voxel_slices.py` after static PNG export. The preview window auto-detects resolution and layer count from the PNG and draws the original PNG slices as GPU-textured stacked sprite cards. It rotates while holding the left/right buttons or keyboard arrows, supports mouse wheel and left-click drag rotation, adjusts layer offset continuously with vertical drag or in `0.1` snapped steps with the right-side `+`/`-` buttons (clamped from `-1` to `1`), and has a right-side black/white toggle for the preview background.
 
 ## Output Format
 
@@ -157,7 +157,7 @@ FolderName__ActionName.png
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |
-| `--bake-res` | `1024` | Bake image resolution. |
+| `--bake-res` | `1024` | Bake image resolution cap; effective size auto-scales with `--res`. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animation spritesheet. |
 | `--action` | `DefaultPose` | Action name, or `All`. |
@@ -232,7 +232,7 @@ python run_voxelator_batch.py --input-dir "/path/to/fbx-folder" --max-files 5
 | `--separate` | `0` | `1` separates cube geometry. |
 | `--apply-modifiers` | `1` | `1` applies object modifiers before voxelizing. |
 | `--bake-colors` | `1` | `1` bakes exact base colors with Cycles before sampling. |
-| `--bake-res` | `1024` | Bake image resolution. |
+| `--bake-res` | `1024` | Bake image resolution cap; effective size auto-scales with `--res`. |
 | `--rot-offset` | `0.0` | Z rotation offset in degrees. |
 | `--export-animation` | `0` | `1` exports animations. |
 | `--action` | `All` | Action name, or `All`. |

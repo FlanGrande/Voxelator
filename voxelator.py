@@ -754,12 +754,15 @@ def _world_bounds(mesh, matrix_world):
 
 _NATIVE_FN = None
 _NATIVE_TRIED = False
+_NATIVE_LIB = None
+_NATIVE_MAP_FN = None
+_NATIVE_MAP_TRIED = False
 _PREVIEW_PYTHON = None
 _PREVIEW_PYTHON_TRIED = False
 
 def _get_native_voxelizer():
     """Compile (first run) and load libvoxelize.so. Returns the ctypes function or None."""
-    global _NATIVE_FN, _NATIVE_TRIED
+    global _NATIVE_FN, _NATIVE_TRIED, _NATIVE_LIB
     if _NATIVE_TRIED:
         return _NATIVE_FN
     _NATIVE_TRIED = True
@@ -797,12 +800,39 @@ def _get_native_voxelizer():
             ctypes.c_int64, ctypes.c_int64, ctypes.c_int64,
             ctypes.POINTER(ctypes.c_uint8),
         )
+        _NATIVE_LIB = lib
         _NATIVE_FN = fn
         _log("[Voxelator] Native voxelizer loaded")
     except Exception as exc:
         _log(f"[Voxelator] Native voxelizer unavailable: {exc}")
         _NATIVE_FN = None
     return _NATIVE_FN
+
+def _get_native_color_mapper():
+    """Bind map_colors from libvoxelize.so. Returns the ctypes function or None."""
+    global _NATIVE_MAP_FN, _NATIVE_MAP_TRIED
+    if _NATIVE_MAP_TRIED:
+        return _NATIVE_MAP_FN
+    _NATIVE_MAP_TRIED = True
+    if _get_native_voxelizer() is None or _NATIVE_LIB is None:
+        return None
+    try:
+        fn = _NATIVE_LIB.map_colors
+        fn.restype = ctypes.c_int
+        fn.argtypes = (
+            ctypes.POINTER(ctypes.c_double), ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_int64), ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float), ctypes.c_int64, ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_double), ctypes.c_int64,
+            ctypes.POINTER(ctypes.c_float),
+        )
+        _NATIVE_MAP_FN = fn
+        _log("[Voxelator] Native color mapper loaded")
+    except Exception as exc:
+        _log(f"[Voxelator] Native color mapper unavailable: {exc}")
+        _NATIVE_MAP_FN = None
+    return _NATIVE_MAP_FN
 
 def _build_occupied_cells_native(mesh, matrix_world, cell_len, grid_min_x, grid_min_y, grid_min_z, dx, dy, dz):
     """Native surface voxelize. Returns set of (ix, iy, iz) or None if unavailable."""
@@ -1098,6 +1128,14 @@ def _uv_from_loop_tri_flat(location_local, loop_tri, uv_flat, verts):
     uv_y = uv_flat[l0 * 2 + 1] * u + uv_flat[l1 * 2 + 1] * v + uv_flat[l2 * 2 + 1] * w
     return (float(uv_x), float(uv_y))
 
+def _effective_bake_resolution(bake_resolution, voxel_resolution):
+    """Bake resolution scaled with voxel resolution; the user setting acts as a cap.
+
+    Small voxel grids cannot use the extra texel density, so baking above
+    ~8 texels per voxel cell edge only costs Cycles time.
+    """
+    return min(max(64, int(bake_resolution)), max(64, int(voxel_resolution) * 8))
+
 def _bake_base_color_image(context, obj, resolution):
     """Bake the exact evaluated Base Color (Cycles diffuse color pass) of all
     materials on obj, using a dedicated non-overlapping UV layer.
@@ -1205,20 +1243,68 @@ def _bake_base_color_image(context, obj, resolution):
         except Exception:
             pass
 
+def _build_cube_maps_native(source_mesh, source_inv, occ_list, ox, oy, oz, cell_len, bake_w, bake_h, bake_px, bake_uv_flat):
+    """Native (C) nearest-triangle bake sampling for all occupied cells.
+    Returns (mapped_count, cube_color_map) or None when unavailable."""
+    if np is None or not occ_list:
+        return None
+    fn = _get_native_color_mapper()
+    if fn is None:
+        return None
+    n_tris = len(source_mesh.loop_triangles)
+    n_verts = len(source_mesh.vertices)
+    if n_tris <= 0 or n_verts <= 0:
+        return None
+    try:
+        vert_buf = np.empty(n_verts * 3, dtype=np.float64)
+        source_mesh.vertices.foreach_get("co", vert_buf)
+        tri_buf = np.empty(n_tris * 3, dtype=np.int64)
+        source_mesh.loop_triangles.foreach_get("vertices", tri_buf)
+        loop_buf = np.empty(n_tris * 3, dtype=np.int64)
+        source_mesh.loop_triangles.foreach_get("loops", loop_buf)
+
+        uvs = np.asarray(bake_uv_flat, dtype=np.float32).reshape(-1, 2)
+        tri_uvs = np.ascontiguousarray(uvs[loop_buf].reshape(-1), dtype=np.float32)
+        px = np.ascontiguousarray(bake_px, dtype=np.float32)
+        if px.size != bake_w * bake_h * 4:
+            return None
+
+        cells = np.asarray(occ_list, dtype=np.float64)
+        centers = cells * float(cell_len) + np.array([ox, oy, oz], dtype=np.float64)
+        m = np.array([[source_inv[i][j] for j in range(4)] for i in range(4)], dtype=np.float64)
+        local = np.ascontiguousarray((centers @ m[:3, :3].T + m[:3, 3]).reshape(-1), dtype=np.float64)
+
+        out = np.empty(len(occ_list) * 4, dtype=np.float32)
+        rc = fn(
+            vert_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), n_verts,
+            tri_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)), n_tris,
+            tri_uvs.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            px.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), int(bake_w), int(bake_h),
+            local.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), len(occ_list),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        if rc != 0:
+            _log(f"[Voxelator] Native color map returned error code {rc}")
+            return None
+        colors = out.reshape(-1, 4)
+        cube_color_map = {}
+        for cell, col in zip(occ_list, colors):
+            cube_color_map[cell] = (float(col[0]), float(col[1]), float(col[2]), float(col[3]))
+        return len(occ_list), cube_color_map
+    except Exception as exc:
+        _log(f"[Voxelator] Native color map failed, falling back to Python: {exc}")
+        return None
+
 def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_matrix=None, mat_source_cache=None, image_cache=None, bake_data=None, progress=None, progress_start=45.0, progress_end=85.0, progress_label="Mapping voxel colors"):
     mapped_count = 0
     cube_color_map = {}
     source_inv = world_to_source_matrix if world_to_source_matrix is not None else source.matrix_world.inverted()
-    source_polys = source.data.polygons
-    source_mats = source.data.materials
     source_mesh = source.data
     source_mesh.calc_loop_triangles()
+    source_polys = source_mesh.polygons
+    source_mats = source_mesh.materials
     source_loops = source_mesh.loops
     source_verts = source_mesh.vertices
-    min_v, max_v = _mesh_bounds(source_verts)
-    loop_tris = list(source_mesh.loop_triangles)
-    uv_layer = source_mesh.uv_layers.active
-    uv_data = uv_layer.data if uv_layer else None
     bake_pixels = None
     bake_uv_flat = None
     if bake_data:
@@ -1234,6 +1320,23 @@ def _build_cube_maps(source, occupied, ox, oy, oz, cell_len, world_to_source_mat
         bake_w, bake_h, bake_px = bake_pixels
     if bake_data and not use_bake:
         _log("[Voxelator] Bake data mismatch with mesh loops; using fallback sampling")
+
+    if use_bake:
+        native_start = time.perf_counter()
+        native_result = _build_cube_maps_native(
+            source_mesh, source_inv, list(occupied), ox, oy, oz, cell_len, bake_w, bake_h, bake_px, bake_uv_flat
+        )
+        if native_result is not None:
+            mapped_count, cube_color_map = native_result
+            _log(f"[Voxelator] Material map (native): {mapped_count} cells in {time.perf_counter() - native_start:.3f}s")
+            if progress:
+                progress.update(progress_end, progress_label)
+            return mapped_count, cube_color_map
+
+    min_v, max_v = _mesh_bounds(source_verts)
+    loop_tris = list(source_mesh.loop_triangles)
+    uv_layer = source_mesh.uv_layers.active
+    uv_data = uv_layer.data if uv_layer else None
     loop_tris_by_poly = {}
     if uv_data or use_bake:
         for loop_tri in loop_tris:
@@ -1621,7 +1724,8 @@ class OBJECT_OT_voxelize(Operator):
                 bake_uv_flat = None
                 if self.bake_colors:
                     progress.update(15.0, "Baking base colors")
-                    bake_key = (source_name, bool(self.apply_modifiers), int(self.bake_resolution))
+                    eff_bake_res = _effective_bake_resolution(self.bake_resolution, self.voxelizeResolution)
+                    bake_key = (source_name, bool(self.apply_modifiers), int(eff_bake_res))
                     cached_bake = _BAKE_CACHE.get("entry")
                     if self.reuse_bake and cached_bake and cached_bake["key"] == bake_key:
                         bake_pixels = cached_bake["pixels"]
@@ -1633,7 +1737,7 @@ class OBJECT_OT_voxelize(Operator):
                         bake_obj = bpy.data.objects.new(source_name + "_voxel_bake", bake_mesh)
                         context.collection.objects.link(bake_obj)
                         try:
-                            bake_pixels, bake_uv_flat = _bake_base_color_image(context, bake_obj, self.bake_resolution)
+                            bake_pixels, bake_uv_flat = _bake_base_color_image(context, bake_obj, eff_bake_res)
                         finally:
                             bpy.data.objects.remove(bake_obj, do_unlink=True)
                             bpy.data.meshes.remove(bake_mesh)
@@ -1781,7 +1885,11 @@ class OBJECT_OT_voxelize(Operator):
         bake_uv_flat = None
         if self.bake_colors:
             progress.update(25.0, "Baking base colors")
-            bake_pixels, bake_uv_flat = _bake_base_color_image(context, target, self.bake_resolution)
+            bake_pixels, bake_uv_flat = _bake_base_color_image(
+                context, target, _effective_bake_resolution(self.bake_resolution, self.voxelizeResolution)
+            )
+        _log(f"[Voxelator][Timing] Bake stage (unwrap+bake+readback): {time.perf_counter() - stage_start:.3f}s")
+        stage_start = time.perf_counter()
         progress.update(45.0, "Mapping voxel colors")
 
         mapped_count, cube_color_map = _build_cube_maps(
